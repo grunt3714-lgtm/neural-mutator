@@ -5,13 +5,14 @@ Standard generational EA with:
 - Tournament selection
 - Self-replication via mutator networks
 - Crossover by feeding one genome's policy into another's mutator
+- Increased elitism and mutation scale decay for stability
 """
 
 import torch
 import numpy as np
 import gymnasium as gym
 from typing import List, Optional, Tuple
-from .genome import Genome, Policy, ChunkMutator, TransformerMutator, CPPNMutator
+from .genome import Genome, Policy, ChunkMutator, TransformerMutator, CPPNMutator, GaussianMutator
 
 
 def evaluate_genome(genome: Genome, env_id: str, n_episodes: int = 5,
@@ -25,7 +26,6 @@ def evaluate_genome(genome: Genome, env_id: str, n_episodes: int = 5,
         total_reward = 0.0
         for _ in range(max_steps):
             action = genome.policy.act(obs)
-            # Handle discrete vs continuous action spaces
             if isinstance(env.action_space, gym.spaces.Discrete):
                 action = int(np.argmax(action))
             else:
@@ -55,6 +55,8 @@ def create_population(pop_size: int, obs_dim: int, act_dim: int,
             mutator = TransformerMutator(chunk_size=chunk_size)
         elif mutator_type == 'cppn':
             mutator = CPPNMutator()
+        elif mutator_type == 'gaussian':
+            mutator = GaussianMutator()
         else:
             raise ValueError(f"Unknown mutator type: {mutator_type}")
 
@@ -72,21 +74,21 @@ def tournament_select(population: List[Genome], k: int = 3) -> Genome:
 
 
 def evolve_generation(population: List[Genome], crossover_rate: float = 0.3,
-                      elitism: int = 2) -> List[Genome]:
+                      elitism: int = 5, generation: int = 0,
+                      max_generations: int = 100) -> List[Genome]:
     """
     Produce next generation via self-replication and crossover.
 
-    - Top `elitism` genomes are copied unchanged
-    - Remaining slots filled by reproduction (mutation via mutator) or crossover
+    - Top `elitism` genomes are copied unchanged (increased from 2 to 5)
+    - Remaining slots filled by reproduction or crossover
+    - Generation number passed for mutation scale decay
     """
     pop_size = len(population)
-
-    # Sort by fitness (descending)
     ranked = sorted(population, key=lambda g: g.fitness, reverse=True)
 
     new_population = []
 
-    # Elitism: keep top performers
+    # Elitism: keep top performers unchanged
     for i in range(min(elitism, pop_size)):
         elite = Genome(
             policy=ranked[i]._clone_policy(),
@@ -102,18 +104,15 @@ def evolve_generation(population: List[Genome], crossover_rate: float = 0.3,
         parent = tournament_select(ranked)
 
         if np.random.random() < crossover_rate:
-            # Crossover: parent's policy + another parent's mutator
             other = tournament_select(ranked)
             try:
-                child = parent.crossover(other)
+                child = parent.crossover(other, generation, max_generations)
             except Exception:
-                child = parent.reproduce()
+                child = parent.reproduce(generation, max_generations)
         else:
-            # Self-replication via mutator
             try:
-                child = parent.reproduce()
+                child = parent.reproduce(generation, max_generations)
             except Exception:
-                # Fallback: clone with random noise if mutator fails
                 child = Genome(
                     policy=parent._clone_policy(),
                     mutator=parent._clone_mutator(),
@@ -135,13 +134,10 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
                   log_interval: int = 1, seed: int = 42) -> dict:
     """
     Main evolution loop.
-
-    Returns dict with history of best/mean fitness per generation.
     """
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    # Get env dimensions
     env = gym.make(env_id)
     obs_dim = env.observation_space.shape[0]
     if isinstance(env.action_space, gym.spaces.Discrete):
@@ -152,7 +148,6 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
 
     print(f"Environment: {env_id} (obs={obs_dim}, act={act_dim})")
 
-    # Create population
     population = create_population(pop_size, obs_dim, act_dim, mutator_type,
                                     hidden, chunk_size)
     genome = population[0]
@@ -176,14 +171,16 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
         mean_fit = np.mean(fitnesses)
         worst_fit = min(fitnesses)
         history['best'].append(best_fit)
-        history['mean'].append(mean_fit)
+        history['mean'].append(float(mean_fit))
         history['worst'].append(worst_fit)
 
         if gen % log_interval == 0:
             print(f"Gen {gen:4d} | Best: {best_fit:8.2f} | Mean: {mean_fit:8.2f} | "
                   f"Worst: {worst_fit:8.2f}")
 
-        # Evolve
-        population = evolve_generation(population, crossover_rate)
+        # Evolve (pass generation for decay)
+        population = evolve_generation(population, crossover_rate,
+                                       elitism=5, generation=gen,
+                                       max_generations=generations)
 
     return history

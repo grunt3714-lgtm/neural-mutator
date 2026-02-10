@@ -21,7 +21,7 @@ from .evolution import run_evolution
 def main():
     parser = argparse.ArgumentParser(description='Neural Mutator Evolution')
     parser.add_argument('--env', default='CartPole-v1', help='Gymnasium environment')
-    parser.add_argument('--mutator', default='chunk', choices=['chunk', 'transformer', 'cppn'],
+    parser.add_argument('--mutator', default='chunk', choices=['chunk', 'transformer', 'cppn', 'gaussian'],
                         help='Mutator architecture')
     parser.add_argument('--pop-size', type=int, default=30, help='Population size')
     parser.add_argument('--generations', type=int, default=100, help='Number of generations')
