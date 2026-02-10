@@ -3,7 +3,8 @@
 Train neural mutator genomes via evolution with true self-replication.
 
 Usage:
-    python -m src.train --env CartPole-v1 --mutator chunk --generations 100 --quine-lambda 0.1
+    python -m src.train --env CartPole-v1 --mutator chunk --generations 100
+    python -m src.train --env LunarLander-v3 --mutator transformer --generations 200
 """
 
 import argparse
@@ -29,8 +30,6 @@ def main():
     parser.add_argument('--hidden', type=int, default=64, help='Policy hidden size')
     parser.add_argument('--chunk-size', type=int, default=64, help='Mutator chunk size')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--quine-lambda', type=float, default=0.1,
-                        help='Weight for quine self-reconstruction fitness bonus (0=disabled)')
     parser.add_argument('--output', default='results', help='Output directory')
     args = parser.parse_args()
 
@@ -51,7 +50,6 @@ def main():
         hidden=args.hidden,
         chunk_size=args.chunk_size,
         seed=args.seed,
-        quine_lambda=args.quine_lambda,
     )
     elapsed = time.time() - start
 
@@ -62,14 +60,13 @@ def main():
     print(f"Final mean drift: {history['mean_mutator_drift'][-1]:.4f}")
 
     # Save results
-    tag = f"{args.env}_{args.mutator}_ql{args.quine_lambda}_s{args.seed}"
+    tag = f"{args.env}_{args.mutator}_s{args.seed}"
     result = {
         'env': args.env,
         'mutator': args.mutator,
         'pop_size': args.pop_size,
         'generations': args.generations,
         'seed': args.seed,
-        'quine_lambda': args.quine_lambda,
         'elapsed_sec': elapsed,
         'history': history,
     }
@@ -89,7 +86,7 @@ def main():
     ax.fill_between(gens, history['worst'], history['best'], alpha=0.15, color='blue')
     ax.set_xlabel('Generation')
     ax.set_ylabel('Fitness')
-    ax.set_title(f'{args.mutator} on {args.env} (quine_λ={args.quine_lambda})')
+    ax.set_title(f'{args.mutator} on {args.env} (true self-replication)')
     ax.legend()
     ax.grid(True, alpha=0.3)
 

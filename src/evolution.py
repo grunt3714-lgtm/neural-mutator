@@ -1,10 +1,10 @@
 """
-Evolutionary algorithm with true self-replication and quine-style fitness bonus.
+Evolutionary algorithm with true self-replication.
 
 Features:
 - Tournament selection
 - Self-replication: mutator processes full genome (policy + mutator weights)
-- Quine lambda: fitness bonus for self-replication fidelity
+- Asymmetric mutation rates: mutator self-modifies at lower rate
 - Tracks mutator drift and fidelity metrics per generation
 """
 
@@ -111,13 +111,13 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
                   generations: int = 100, mutator_type: str = 'chunk',
                   n_eval_episodes: int = 5, crossover_rate: float = 0.3,
                   hidden: int = 64, chunk_size: int = 64,
-                  log_interval: int = 1, seed: int = 42,
-                  quine_lambda: float = 0.0) -> Dict:
+                  log_interval: int = 1, seed: int = 42) -> Dict:
     """
-    Main evolution loop with quine-style self-replication tracking.
+    Main evolution loop with true self-replication.
 
-    quine_lambda: weight for self-replication fidelity bonus in fitness.
-                  Higher = more selection pressure for stable self-replication.
+    The mutator processes the full genome (policy + mutator weights) and
+    outputs a new full genome. Natural selection is the only filter —
+    mutators that destroy themselves die, those that improve themselves thrive.
     """
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -138,7 +138,7 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
     print(f"Genome: {genome.num_policy_params()} policy params + "
           f"{genome.num_mutator_params()} mutator params = "
           f"{genome.num_total_params()} total")
-    print(f"Mutator type: {mutator_type}, Quine lambda: {quine_lambda}")
+    print(f"Mutator type: {mutator_type}")
     print(f"Population: {pop_size}, Generations: {generations}")
     print()
 
@@ -149,27 +149,16 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
 
     history = {
         'best': [], 'mean': [], 'worst': [],
-        'mean_fidelity': [],  # mean self-replication fidelity (lower = better)
-        'best_fidelity': [],  # best genome's fidelity
-        'mean_mutator_drift': [],  # mean L2 drift from initial mutator weights
+        'mean_fidelity': [],
+        'best_fidelity': [],
+        'mean_mutator_drift': [],
         'max_mutator_drift': [],
     }
 
     for gen in range(generations):
-        # Evaluate raw fitness
+        # Evaluate fitness — pure environment reward, no bonuses
         for g in population:
             g.fitness = evaluate_genome(g, env_id, n_eval_episodes)
-
-        # Compute quine bonus: reward low self_replication_fidelity
-        # Fidelity is L2 distance (lower = better), so bonus = -fidelity
-        if quine_lambda > 0:
-            fidelities = [g.self_replication_fidelity for g in population]
-            max_fid = max(fidelities) if max(fidelities) > 0 else 1.0
-            for g in population:
-                # Normalize fidelity bonus to [0, 1] range, invert so lower distance = higher bonus
-                quine_bonus = (1.0 - g.self_replication_fidelity / max_fid)
-                # Scale bonus relative to typical fitness range
-                g.fitness += quine_lambda * quine_bonus * 100.0  # CartPole max ~500
 
         fitnesses = [g.fitness for g in population]
         fidelities = [g.self_replication_fidelity for g in population]
@@ -183,7 +172,6 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
         drifts = []
         for i, g in enumerate(population):
             current_mutator = g.get_flat_mutator_weights()
-            # Compare to closest initial (use index mod initial size)
             ref_idx = i % len(initial_mutator_weights)
             drift = torch.norm(current_mutator - initial_mutator_weights[ref_idx]).item()
             drifts.append(drift)

@@ -2,14 +2,10 @@
 Genome: Policy + Mutator bundled together with TRUE self-replication.
 
 The mutator processes the ENTIRE genome (policy + mutator weights) and outputs
-a new full genome — including its own weights. This is quine-style self-replication.
+a new full genome — including its own weights. This is true self-replication.
 
-Stabilization strategies to prevent catastrophic self-destruction:
-1. Asymmetric mutation rates (0.1x for mutator weights vs 1x for policy)
-2. Reconstruction regularization (clip mutator-portion delta)
-3. Quine-style self-reconstruction fitness bonus
-4. Adaptive protection (track and limit mutator drift)
-5. Mutation scale decay, delta clamping, weight clipping
+Stabilization: asymmetric mutation rates (0.1x for mutator weights vs 1x for policy).
+Natural selection handles the rest — if a mutator destroys itself, it dies.
 """
 
 import torch
@@ -124,16 +120,10 @@ class Genome:
     A complete genome: policy + mutator with TRUE self-replication.
 
     The mutator processes the ENTIRE genome (policy + its own weights)
-    and produces a new full genome. Stabilized via:
-    - Asymmetric mutation rates (mutator portion scaled by 0.1x)
-    - Reconstruction regularization (clip mutator delta if too large)
-    - Adaptive protection (track mutator drift)
-    - Mutation scale decay over generations
-    - Global weight clipping
+    and produces a new full genome. Stabilized only by asymmetric mutation
+    rates — natural selection handles the rest.
     """
 
-    # Adaptive protection: max allowed L2 norm for mutator delta
-    MUTATOR_DELTA_MAX_NORM = 0.5
     # Asymmetric rate: mutator weights get this fraction of mutation
     MUTATOR_SELF_RATE = 0.1
 
@@ -183,12 +173,7 @@ class Genome:
         TRUE self-replication: feed the ENTIRE genome (policy + mutator weights)
         through the mutator, producing a new full genome.
 
-        Stabilization:
-        1. Asymmetric rates: mutator-portion delta scaled by 0.1x
-        2. Reconstruction regularization: clip mutator delta if L2 norm too large
-        3. Adaptive protection: scale back if exceeding threshold
-        4. Decay mutation scale over generations
-        5. Global weight clipping
+        Stabilization: asymmetric rates (mutator delta scaled by 0.1x) + decay + clipping.
         """
         n_policy = self.num_policy_params()
         n_mutator = self.num_mutator_params()
@@ -214,12 +199,7 @@ class Genome:
 
         # ASYMMETRIC MUTATION: scale down mutator self-modification
         mutator_delta = mutator_delta * decay * self.MUTATOR_SELF_RATE
-
-        # RECONSTRUCTION REGULARIZATION: clip mutator delta if too large
         mutator_delta_norm = torch.norm(mutator_delta).item()
-        if mutator_delta_norm > self.MUTATOR_DELTA_MAX_NORM:
-            mutator_delta = mutator_delta * (self.MUTATOR_DELTA_MAX_NORM / mutator_delta_norm)
-            mutator_delta_norm = self.MUTATOR_DELTA_MAX_NORM
 
         # Reconstruct
         new_policy = parent_full[:n_policy] + policy_delta
@@ -262,11 +242,7 @@ class Genome:
         full_delta = mutated_full - combined
         policy_delta = full_delta[:n_policy] * decay
         mutator_delta = full_delta[n_policy:] * decay * self.MUTATOR_SELF_RATE
-
         mutator_delta_norm = torch.norm(mutator_delta).item()
-        if mutator_delta_norm > self.MUTATOR_DELTA_MAX_NORM:
-            mutator_delta = mutator_delta * (self.MUTATOR_DELTA_MAX_NORM / mutator_delta_norm)
-            mutator_delta_norm = self.MUTATOR_DELTA_MAX_NORM
 
         new_policy = my_policy + policy_delta
         new_mutator = other_mutator + mutator_delta
