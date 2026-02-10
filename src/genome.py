@@ -1,20 +1,22 @@
 """
-Genome: Policy + Mutator bundled together.
+Genome: Policy + Mutator bundled together with TRUE self-replication.
 
-The mutator takes the full genome (policy + mutator weights flattened)
-and outputs the next generation's genome.
+The mutator processes the ENTIRE genome (policy + mutator weights) and outputs
+a new full genome — including its own weights. This is quine-style self-replication.
 
-Stability improvements:
-- Mutation scale decay over generations
-- Separate mutator protection (smaller perturbations for mutator weights)
-- Weight clipping on mutator output
-- Gaussian noise baseline mutator
+Stabilization strategies to prevent catastrophic self-destruction:
+1. Asymmetric mutation rates (0.1x for mutator weights vs 1x for policy)
+2. Reconstruction regularization (clip mutator-portion delta)
+3. Quine-style self-reconstruction fitness bonus
+4. Adaptive protection (track and limit mutator drift)
+5. Mutation scale decay, delta clamping, weight clipping
 """
 
 import torch
 import torch.nn as nn
 import numpy as np
 from typing import Tuple, Optional
+import copy
 
 
 class Policy(nn.Module):
@@ -41,15 +43,11 @@ class Policy(nn.Module):
 
 
 class GaussianMutator(nn.Module):
-    """
-    Baseline: simple Gaussian noise mutation (ES-style).
-    No learned parameters — just adds scaled noise.
-    """
+    """Baseline: simple Gaussian noise mutation (ES-style)."""
 
     def __init__(self, mutation_scale: float = 0.02):
         super().__init__()
         self.base_scale = mutation_scale
-        # Register a dummy parameter so param counting works
         self.dummy = nn.Parameter(torch.tensor(0.0), requires_grad=False)
 
     def mutate_genome(self, flat_weights: torch.Tensor,
@@ -59,9 +57,7 @@ class GaussianMutator(nn.Module):
 
 
 class ChunkMutator(nn.Module):
-    """
-    Chunk-based MLP mutator.
-    """
+    """Chunk-based MLP mutator."""
 
     def __init__(self, chunk_size: int = 64, hidden: int = 128):
         super().__init__()
@@ -76,10 +72,6 @@ class ChunkMutator(nn.Module):
         )
         self.mutation_scale = nn.Parameter(torch.tensor(0.01))
 
-    def forward(self, chunk: torch.Tensor) -> torch.Tensor:
-        delta = self.net(chunk) * self.mutation_scale
-        return chunk + delta
-
     def mutate_genome(self, flat_weights: torch.Tensor,
                       weight_coords: torch.Tensor = None) -> torch.Tensor:
         n = flat_weights.shape[0]
@@ -89,7 +81,6 @@ class ChunkMutator(nn.Module):
 
         chunks = padded.view(-1, cs)
         delta = self.net(chunks) * self.mutation_scale
-        # Clip delta to prevent catastrophic changes
         delta = torch.clamp(delta, -0.1, 0.1)
         mutated = chunks + delta
         return mutated.view(-1)[:n]
@@ -128,40 +119,23 @@ class TransformerMutator(nn.Module):
         return mutated
 
 
-class CPPNMutator(nn.Module):
-    """CPPN-style mutator."""
-
-    def __init__(self, hidden: int = 64, n_layers: int = 3):
-        super().__init__()
-        layers = [nn.Linear(4, hidden), nn.Tanh()]
-        for _ in range(n_layers - 1):
-            layers.extend([nn.Linear(hidden, hidden), nn.Tanh()])
-        layers.append(nn.Linear(hidden, 1))
-        self.net = nn.Sequential(*layers)
-        self.mutation_scale = nn.Parameter(torch.tensor(0.1))
-
-    def forward(self, coords: torch.Tensor) -> torch.Tensor:
-        return self.net(coords) * self.mutation_scale
-
-    def mutate_genome(self, flat_weights: torch.Tensor,
-                      weight_coords: torch.Tensor = None) -> torch.Tensor:
-        if weight_coords is None:
-            raise ValueError("CPPN requires weight_coords")
-        delta = self.net(weight_coords).squeeze(-1) * self.mutation_scale
-        delta = torch.clamp(delta, -0.1, 0.1)
-        return flat_weights + delta
-
-
 class Genome:
     """
-    A complete genome: policy + mutator.
+    A complete genome: policy + mutator with TRUE self-replication.
 
-    Stability features:
-    - Mutator weights receive 10x smaller perturbations than policy weights
-    - Mutation scale decays over generations
-    - Output deltas are clamped to [-0.1, 0.1]
-    - Global weight clipping after mutation
+    The mutator processes the ENTIRE genome (policy + its own weights)
+    and produces a new full genome. Stabilized via:
+    - Asymmetric mutation rates (mutator portion scaled by 0.1x)
+    - Reconstruction regularization (clip mutator delta if too large)
+    - Adaptive protection (track mutator drift)
+    - Mutation scale decay over generations
+    - Global weight clipping
     """
+
+    # Adaptive protection: max allowed L2 norm for mutator delta
+    MUTATOR_DELTA_MAX_NORM = 0.5
+    # Asymmetric rate: mutator weights get this fraction of mutation
+    MUTATOR_SELF_RATE = 0.1
 
     def __init__(self, policy: Policy, mutator: nn.Module,
                  mutator_type: str = 'chunk'):
@@ -169,7 +143,8 @@ class Genome:
         self.mutator = mutator
         self.mutator_type = mutator_type
         self.fitness = 0.0
-        self._weight_coords = None
+        self.self_replication_fidelity = 0.0  # how well mutator preserves itself
+        self.mutator_delta_norm = 0.0  # magnitude of mutator weight change
 
     def get_flat_weights(self) -> torch.Tensor:
         policy_params = torch.cat([p.data.view(-1) for p in self.policy.parameters()])
@@ -205,41 +180,57 @@ class Genome:
     @torch.no_grad()
     def reproduce(self, generation: int = 0, max_generations: int = 100) -> 'Genome':
         """
-        Self-replication with stability improvements:
-        1. Only mutate policy weights through the mutator
-        2. Apply small Gaussian noise to mutator weights (protective)
-        3. Decay mutation scale over generations
-        4. Clip all weights after mutation
+        TRUE self-replication: feed the ENTIRE genome (policy + mutator weights)
+        through the mutator, producing a new full genome.
+
+        Stabilization:
+        1. Asymmetric rates: mutator-portion delta scaled by 0.1x
+        2. Reconstruction regularization: clip mutator delta if L2 norm too large
+        3. Adaptive protection: scale back if exceeding threshold
+        4. Decay mutation scale over generations
+        5. Global weight clipping
         """
         n_policy = self.num_policy_params()
-        policy_flat = self.get_flat_policy_weights()
-        mutator_flat = self.get_flat_mutator_weights()
+        n_mutator = self.num_mutator_params()
+        parent_full = self.get_flat_weights()
+        parent_mutator = parent_full[n_policy:]
 
-        # Decay factor: starts at 1.0, decays to 0.2 over generations
+        # Decay factor
         decay = max(0.2, 1.0 - 0.8 * (generation / max(max_generations, 1)))
 
-        # Mutate policy weights through the mutator network
-        if self.mutator_type == 'cppn':
-            # For CPPN, only use policy coords
-            coords = self._get_policy_weight_coords()
-            mutated_policy = self.mutator.mutate_genome(policy_flat, coords)
-        elif self.mutator_type == 'gaussian':
-            mutated_policy = self.mutator.mutate_genome(policy_flat)
+        # Feed FULL genome through the mutator
+        if self.mutator_type == 'gaussian':
+            mutated_full = self.mutator.mutate_genome(parent_full)
         else:
-            mutated_policy = self.mutator.mutate_genome(policy_flat)
+            mutated_full = self.mutator.mutate_genome(parent_full)
 
-        # Apply decay to the delta
-        delta = mutated_policy - policy_flat
-        mutated_policy = policy_flat + delta * decay
+        # Compute deltas
+        full_delta = mutated_full - parent_full
+        policy_delta = full_delta[:n_policy]
+        mutator_delta = full_delta[n_policy:]
 
-        # Small protective noise on mutator weights (not through the mutator itself)
-        mutator_noise = torch.randn_like(mutator_flat) * 0.002 * decay
-        mutated_mutator = mutator_flat + mutator_noise
+        # Apply decay to policy delta
+        policy_delta = policy_delta * decay
 
-        new_flat = torch.cat([mutated_policy, mutated_mutator])
+        # ASYMMETRIC MUTATION: scale down mutator self-modification
+        mutator_delta = mutator_delta * decay * self.MUTATOR_SELF_RATE
 
-        # Global weight clipping to prevent explosion
+        # RECONSTRUCTION REGULARIZATION: clip mutator delta if too large
+        mutator_delta_norm = torch.norm(mutator_delta).item()
+        if mutator_delta_norm > self.MUTATOR_DELTA_MAX_NORM:
+            mutator_delta = mutator_delta * (self.MUTATOR_DELTA_MAX_NORM / mutator_delta_norm)
+            mutator_delta_norm = self.MUTATOR_DELTA_MAX_NORM
+
+        # Reconstruct
+        new_policy = parent_full[:n_policy] + policy_delta
+        new_mutator = parent_mutator + mutator_delta
+        new_flat = torch.cat([new_policy, new_mutator])
+
+        # Global weight clipping
         new_flat = torch.clamp(new_flat, -5.0, 5.0)
+
+        # Compute self-replication fidelity (L2 distance, lower = better preservation)
+        fidelity = torch.norm(new_mutator - parent_mutator).item()
 
         child = Genome(
             policy=self._clone_policy(),
@@ -247,34 +238,42 @@ class Genome:
             mutator_type=self.mutator_type,
         )
         child.set_flat_weights(new_flat)
+        child.self_replication_fidelity = fidelity
+        child.mutator_delta_norm = mutator_delta_norm
         return child
 
     @torch.no_grad()
     def crossover(self, other: 'Genome', generation: int = 0,
                   max_generations: int = 100) -> 'Genome':
-        """Crossover with same stability protections."""
+        """Crossover with same self-replication stabilization."""
+        n_policy = self.num_policy_params()
+        # Use self's policy + other's mutator, feed full genome through other's mutator
         my_policy = self.get_flat_policy_weights()
+        other_mutator = other.get_flat_mutator_weights()
+        combined = torch.cat([my_policy, other_mutator])
 
         decay = max(0.2, 1.0 - 0.8 * (generation / max(max_generations, 1)))
 
-        if other.mutator_type == 'cppn':
-            coords = other._get_policy_weight_coords()
-            mutated_policy = other.mutator.mutate_genome(my_policy, coords)
-        elif other.mutator_type == 'gaussian':
-            mutated_policy = other.mutator.mutate_genome(my_policy)
+        if other.mutator_type == 'gaussian':
+            mutated_full = other.mutator.mutate_genome(combined)
         else:
-            mutated_policy = other.mutator.mutate_genome(my_policy)
+            mutated_full = other.mutator.mutate_genome(combined)
 
-        delta = mutated_policy - my_policy
-        mutated_policy = my_policy + delta * decay
+        full_delta = mutated_full - combined
+        policy_delta = full_delta[:n_policy] * decay
+        mutator_delta = full_delta[n_policy:] * decay * self.MUTATOR_SELF_RATE
 
-        # Keep other's mutator with small noise
-        other_mutator = other.get_flat_mutator_weights()
-        mutator_noise = torch.randn_like(other_mutator) * 0.002 * decay
-        mutated_mutator = other_mutator + mutator_noise
+        mutator_delta_norm = torch.norm(mutator_delta).item()
+        if mutator_delta_norm > self.MUTATOR_DELTA_MAX_NORM:
+            mutator_delta = mutator_delta * (self.MUTATOR_DELTA_MAX_NORM / mutator_delta_norm)
+            mutator_delta_norm = self.MUTATOR_DELTA_MAX_NORM
 
-        new_flat = torch.cat([mutated_policy, mutated_mutator])
+        new_policy = my_policy + policy_delta
+        new_mutator = other_mutator + mutator_delta
+        new_flat = torch.cat([new_policy, new_mutator])
         new_flat = torch.clamp(new_flat, -5.0, 5.0)
+
+        fidelity = torch.norm(new_mutator - other_mutator).item()
 
         child = Genome(
             policy=self._clone_policy(),
@@ -282,6 +281,8 @@ class Genome:
             mutator_type=other.mutator_type,
         )
         child.set_flat_weights(new_flat)
+        child.self_replication_fidelity = fidelity
+        child.mutator_delta_norm = mutator_delta_norm
         return child
 
     def _clone_policy(self) -> Policy:
@@ -291,63 +292,4 @@ class Genome:
         return Policy(first_layer.in_features, last_layer.out_features, hidden)
 
     def _clone_mutator(self) -> nn.Module:
-        import copy
         return copy.deepcopy(self.mutator)
-
-    def _get_policy_weight_coords(self) -> torch.Tensor:
-        """Generate coordinates only for policy weights (for CPPN stability)."""
-        coords = []
-        layer_idx = 0
-        for name, p in self.policy.named_parameters():
-            is_bias = 'bias' in name or p.dim() == 1
-            shape = p.shape
-            if is_bias:
-                for i in range(shape[0]):
-                    coords.append([layer_idx / 10.0, i / max(shape[0], 1), 0.0, 1.0])
-            elif p.dim() >= 2:
-                for i in range(shape[0]):
-                    for j in range(shape[1]):
-                        coords.append([
-                            layer_idx / 10.0,
-                            i / max(shape[0], 1),
-                            j / max(shape[1], 1),
-                            0.0,
-                        ])
-            else:
-                for i in range(p.numel()):
-                    coords.append([layer_idx / 10.0, i / max(p.numel(), 1), 0.0, 0.5])
-            if not is_bias:
-                layer_idx += 1
-        return torch.FloatTensor(coords)
-
-    def _get_weight_coords(self) -> torch.Tensor:
-        """Generate normalized coordinates for all weights (for CPPN)."""
-        if self._weight_coords is not None:
-            return self._weight_coords
-
-        coords = []
-        layer_idx = 0
-        for name, p in list(self.policy.named_parameters()) + \
-                        list(self.mutator.named_parameters()):
-            is_bias = 'bias' in name or p.dim() == 1
-            shape = p.shape
-            if is_bias:
-                for i in range(shape[0]):
-                    coords.append([layer_idx / 10.0, i / max(shape[0], 1), 0.0, 1.0])
-            elif p.dim() >= 2:
-                for i in range(shape[0]):
-                    for j in range(shape[1]):
-                        coords.append([
-                            layer_idx / 10.0,
-                            i / max(shape[0], 1),
-                            j / max(shape[1], 1),
-                            0.0,
-                        ])
-            else:
-                for i in range(p.numel()):
-                    coords.append([layer_idx / 10.0, i / max(p.numel(), 1), 0.0, 0.5])
-            if not is_bias:
-                layer_idx += 1
-
-        self._weight_coords = torch.FloatTensor(coords)
-        return self._weight_coords

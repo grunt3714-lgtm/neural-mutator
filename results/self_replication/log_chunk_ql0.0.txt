@@ -1,0 +1,116 @@
+============================================================
+Neural Mutator Evolution (True Self-Replication)
+============================================================
+Environment: CartPole-v1 (obs=4, act=2)
+Genome: 4610 policy params + 33089 mutator params = 37699 total
+Mutator type: chunk, Quine lambda: 0.0
+Population: 30, Generations: 100
+
+Gen    0 | Best:    88.20 | Mean:    16.51 | Fidelity: 0.0000 | Drift: 0.0000
+Gen    1 | Best:    91.80 | Mean:    31.15 | Fidelity: 0.0098 | Drift: 14.1802
+Gen    2 | Best:   100.60 | Mean:    56.71 | Fidelity: 0.0107 | Drift: 14.1974
+Gen    3 | Best:   114.20 | Mean:    85.85 | Fidelity: 0.0108 | Drift: 14.1967
+Gen    4 | Best:   175.40 | Mean:   111.32 | Fidelity: 0.0101 | Drift: 14.2171
+Gen    5 | Best:   189.20 | Mean:   129.18 | Fidelity: 0.0100 | Drift: 14.2207
+Gen    6 | Best:   257.40 | Mean:   160.13 | Fidelity: 0.0098 | Drift: 14.2255
+Gen    7 | Best:   293.00 | Mean:   183.19 | Fidelity: 0.0097 | Drift: 14.2278
+Gen    8 | Best:   258.60 | Mean:   197.53 | Fidelity: 0.0097 | Drift: 14.2279
+Gen    9 | Best:   251.20 | Mean:   195.25 | Fidelity: 0.0096 | Drift: 14.2286
+Gen   10 | Best:   303.60 | Mean:   177.12 | Fidelity: 0.0096 | Drift: 14.2289
+Gen   11 | Best:   238.00 | Mean:   165.82 | Fidelity: 0.0095 | Drift: 14.2290
+Gen   12 | Best:   244.80 | Mean:   160.83 | Fidelity: 0.0095 | Drift: 14.2291
+Gen   13 | Best:   236.40 | Mean:   149.64 | Fidelity: 0.0094 | Drift: 14.2285
+Gen   14 | Best:   231.20 | Mean:   151.07 | Fidelity: 0.0094 | Drift: 14.2295
+Gen   15 | Best:   179.80 | Mean:   137.77 | Fidelity: 0.0093 | Drift: 14.2295
+Gen   16 | Best:   211.00 | Mean:   138.45 | Fidelity: 0.0092 | Drift: 14.2299
+Gen   17 | Best:   165.00 | Mean:   130.29 | Fidelity: 0.0091 | Drift: 14.2299
+Gen   18 | Best:   172.40 | Mean:   134.47 | Fidelity: 0.0091 | Drift: 14.2299
+Gen   19 | Best:   174.00 | Mean:   131.39 | Fidelity: 0.0090 | Drift: 14.2302
+Gen   20 | Best:   155.20 | Mean:   129.14 | Fidelity: 0.0089 | Drift: 14.2303
+Gen   21 | Best:   168.00 | Mean:   127.63 | Fidelity: 0.0088 | Drift: 14.2313
+Gen   22 | Best:   151.80 | Mean:   118.43 | Fidelity: 0.0088 | Drift: 14.2313
+Gen   23 | Best:   176.80 | Mean:   124.91 | Fidelity: 0.0087 | Drift: 14.2317
+Gen   24 | Best:   149.60 | Mean:   117.41 | Fidelity: 0.0087 | Drift: 14.2309
+Gen   25 | Best:   147.00 | Mean:   114.39 | Fidelity: 0.0086 | Drift: 14.2309
+Gen   26 | Best:   151.20 | Mean:   115.28 | Fidelity: 0.0085 | Drift: 14.2316
+Gen   27 | Best:   131.40 | Mean:   109.93 | Fidelity: 0.0085 | Drift: 14.2316
+Gen   28 | Best:   132.20 | Mean:   108.66 | Fidelity: 0.0084 | Drift: 14.2320
+Gen   29 | Best:   207.20 | Mean:   108.23 | Fidelity: 0.0083 | Drift: 14.2324
+Gen   30 | Best:   123.20 | Mean:   102.51 | Fidelity: 0.0083 | Drift: 14.2328
+Gen   31 | Best:   126.20 | Mean:   102.91 | Fidelity: 0.0082 | Drift: 14.2331
+Gen   32 | Best:   122.80 | Mean:   103.07 | Fidelity: 0.0081 | Drift: 14.2349
+Gen   33 | Best:   120.60 | Mean:   100.21 | Fidelity: 0.0081 | Drift: 14.2354
+Gen   34 | Best:   127.00 | Mean:   100.95 | Fidelity: 0.0080 | Drift: 14.2332
+Gen   35 | Best:   115.00 | Mean:    98.61 | Fidelity: 0.0079 | Drift: 14.2345
+Gen   36 | Best:   116.40 | Mean:    97.11 | Fidelity: 0.0078 | Drift: 14.2347
+Gen   37 | Best:   125.00 | Mean:    98.29 | Fidelity: 0.0077 | Drift: 14.2331
+Gen   38 | Best:   120.20 | Mean:    98.32 | Fidelity: 0.0076 | Drift: 14.2330
+Gen   39 | Best:   119.20 | Mean:    97.86 | Fidelity: 0.0076 | Drift: 14.2331
+Gen   40 | Best:   114.20 | Mean:    96.25 | Fidelity: 0.0075 | Drift: 14.2346
+Gen   41 | Best:   118.80 | Mean:    96.37 | Fidelity: 0.0074 | Drift: 14.2331
+Gen   42 | Best:   114.40 | Mean:    95.32 | Fidelity: 0.0074 | Drift: 14.2346
+Gen   43 | Best:   111.20 | Mean:    96.88 | Fidelity: 0.0073 | Drift: 14.2332
+Gen   44 | Best:   122.40 | Mean:    96.72 | Fidelity: 0.0072 | Drift: 14.2333
+Gen   45 | Best:   118.20 | Mean:    96.41 | Fidelity: 0.0071 | Drift: 14.2350
+Gen   46 | Best:   123.20 | Mean:    98.19 | Fidelity: 0.0070 | Drift: 14.2332
+Gen   47 | Best:   119.40 | Mean:    96.68 | Fidelity: 0.0070 | Drift: 14.2345
+Gen   48 | Best:   124.20 | Mean:    97.81 | Fidelity: 0.0069 | Drift: 14.2347
+Gen   49 | Best:   116.20 | Mean:    97.08 | Fidelity: 0.0068 | Drift: 14.2348
+Gen   50 | Best:   119.80 | Mean:    98.96 | Fidelity: 0.0067 | Drift: 14.2349
+Gen   51 | Best:   114.60 | Mean:    97.11 | Fidelity: 0.0066 | Drift: 14.2348
+Gen   52 | Best:   123.60 | Mean:    97.62 | Fidelity: 0.0066 | Drift: 14.2345
+Gen   53 | Best:   117.80 | Mean:    97.40 | Fidelity: 0.0065 | Drift: 14.2349
+Gen   54 | Best:   111.40 | Mean:    96.85 | Fidelity: 0.0064 | Drift: 14.2349
+Gen   55 | Best:   117.40 | Mean:    96.53 | Fidelity: 0.0063 | Drift: 14.2348
+Gen   56 | Best:   121.60 | Mean:    96.51 | Fidelity: 0.0062 | Drift: 14.2335
+Gen   57 | Best:   121.20 | Mean:    94.99 | Fidelity: 0.0062 | Drift: 14.2349
+Gen   58 | Best:   114.00 | Mean:    95.77 | Fidelity: 0.0060 | Drift: 14.2345
+Gen   59 | Best:   117.60 | Mean:    95.89 | Fidelity: 0.0059 | Drift: 14.2332
+Gen   60 | Best:   113.00 | Mean:    98.10 | Fidelity: 0.0059 | Drift: 14.2344
+Gen   61 | Best:   118.00 | Mean:    97.00 | Fidelity: 0.0058 | Drift: 14.2329
+Gen   62 | Best:   120.80 | Mean:    96.86 | Fidelity: 0.0057 | Drift: 14.2342
+Gen   63 | Best:   119.60 | Mean:    95.45 | Fidelity: 0.0055 | Drift: 14.2330
+Gen   64 | Best:   111.80 | Mean:    95.98 | Fidelity: 0.0054 | Drift: 14.2327
+Gen   65 | Best:   113.00 | Mean:    95.89 | Fidelity: 0.0053 | Drift: 14.2329
+Gen   66 | Best:   108.40 | Mean:    93.57 | Fidelity: 0.0052 | Drift: 14.2330
+Gen   67 | Best:   106.80 | Mean:    94.03 | Fidelity: 0.0051 | Drift: 14.2333
+Gen   68 | Best:   104.40 | Mean:    93.39 | Fidelity: 0.0050 | Drift: 14.2332
+Gen   69 | Best:   102.40 | Mean:    93.13 | Fidelity: 0.0049 | Drift: 14.2333
+Gen   70 | Best:   103.80 | Mean:    93.63 | Fidelity: 0.0049 | Drift: 14.2332
+Gen   71 | Best:   102.60 | Mean:    93.11 | Fidelity: 0.0048 | Drift: 14.2333
+Gen   72 | Best:   101.40 | Mean:    93.16 | Fidelity: 0.0047 | Drift: 14.2337
+Gen   73 | Best:    96.60 | Mean:    91.03 | Fidelity: 0.0046 | Drift: 14.2338
+Gen   74 | Best:    99.80 | Mean:    90.93 | Fidelity: 0.0045 | Drift: 14.2338
+Gen   75 | Best:    97.40 | Mean:    89.69 | Fidelity: 0.0044 | Drift: 14.2338
+Gen   76 | Best:   102.20 | Mean:    90.88 | Fidelity: 0.0043 | Drift: 14.2339
+Gen   77 | Best:   100.40 | Mean:    90.90 | Fidelity: 0.0043 | Drift: 14.2340
+Gen   78 | Best:    95.80 | Mean:    88.89 | Fidelity: 0.0042 | Drift: 14.2339
+Gen   79 | Best:    96.60 | Mean:    89.95 | Fidelity: 0.0041 | Drift: 14.2341
+Gen   80 | Best:   100.00 | Mean:    89.92 | Fidelity: 0.0040 | Drift: 14.2342
+Gen   81 | Best:    93.60 | Mean:    89.19 | Fidelity: 0.0039 | Drift: 14.2343
+Gen   82 | Best:    94.60 | Mean:    89.17 | Fidelity: 0.0038 | Drift: 14.2345
+Gen   83 | Best:    96.20 | Mean:    89.53 | Fidelity: 0.0038 | Drift: 14.2346
+Gen   84 | Best:    96.00 | Mean:    88.69 | Fidelity: 0.0037 | Drift: 14.2347
+Gen   85 | Best:    95.40 | Mean:    89.25 | Fidelity: 0.0036 | Drift: 14.2348
+Gen   86 | Best:    93.00 | Mean:    87.85 | Fidelity: 0.0035 | Drift: 14.2353
+Gen   87 | Best:    92.60 | Mean:    87.37 | Fidelity: 0.0034 | Drift: 14.2349
+Gen   88 | Best:    93.00 | Mean:    87.82 | Fidelity: 0.0033 | Drift: 14.2356
+Gen   89 | Best:    93.60 | Mean:    85.43 | Fidelity: 0.0032 | Drift: 14.2354
+Gen   90 | Best:    92.60 | Mean:    81.48 | Fidelity: 0.0032 | Drift: 14.2360
+Gen   91 | Best:    95.80 | Mean:    78.65 | Fidelity: 0.0031 | Drift: 14.2356
+Gen   92 | Best:    92.20 | Mean:    84.51 | Fidelity: 0.0030 | Drift: 14.2355
+Gen   93 | Best:    95.20 | Mean:    87.53 | Fidelity: 0.0029 | Drift: 14.2358
+Gen   94 | Best:    92.60 | Mean:    86.54 | Fidelity: 0.0028 | Drift: 14.2357
+Gen   95 | Best:    91.60 | Mean:    85.27 | Fidelity: 0.0027 | Drift: 14.2358
+Gen   96 | Best:    95.00 | Mean:    83.83 | Fidelity: 0.0026 | Drift: 14.2358
+Gen   97 | Best:    89.20 | Mean:    79.43 | Fidelity: 0.0026 | Drift: 14.2360
+Gen   98 | Best:    90.00 | Mean:    76.76 | Fidelity: 0.0025 | Drift: 14.2360
+Gen   99 | Best:    93.40 | Mean:    70.82 | Fidelity: 0.0024 | Drift: 14.2362
+
+Done in 260.4s
+Final best:  93.40
+Final mean:  70.82
+Final mean fidelity: 0.0024
+Final mean drift: 14.2362
+Results saved: results/self_replication/CartPole-v1_chunk_ql0.0_s42.json
+Plot saved: results/self_replication/CartPole-v1_chunk_ql0.0_s42.png

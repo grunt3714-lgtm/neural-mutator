@@ -1,0 +1,36 @@
+============================================================
+Neural Mutator Evolution (True Self-Replication)
+============================================================
+Environment: CartPole-v1 (obs=4, act=2)
+Genome: 4610 policy params + 1 mutator params = 4611 total
+Mutator type: gaussian, Quine lambda: 0.0
+Population: 20, Generations: 20
+
+Gen    0 | Best:    24.33 | Mean:    11.00 | Fidelity: 0.0000 | Drift: 0.0000
+Gen    1 | Best:   107.00 | Mean:    19.17 | Fidelity: 0.0018 | Drift: 0.0018
+Gen    2 | Best:    89.33 | Mean:    32.32 | Fidelity: 0.0017 | Drift: 0.0021
+Gen    3 | Best:    96.67 | Mean:    51.52 | Fidelity: 0.0016 | Drift: 0.0030
+Gen    4 | Best:   136.67 | Mean:    63.53 | Fidelity: 0.0015 | Drift: 0.0028
+Gen    5 | Best:   104.67 | Mean:    63.05 | Fidelity: 0.0018 | Drift: 0.0034
+Gen    6 | Best:    99.67 | Mean:    63.77 | Fidelity: 0.0016 | Drift: 0.0026
+Gen    7 | Best:   279.33 | Mean:    82.20 | Fidelity: 0.0014 | Drift: 0.0030
+Gen    8 | Best:   106.33 | Mean:    68.23 | Fidelity: 0.0015 | Drift: 0.0042
+Gen    9 | Best:   141.00 | Mean:    74.62 | Fidelity: 0.0011 | Drift: 0.0033
+Gen   10 | Best:   165.67 | Mean:    85.32 | Fidelity: 0.0009 | Drift: 0.0033
+Gen   11 | Best:   180.67 | Mean:    87.55 | Fidelity: 0.0009 | Drift: 0.0039
+Gen   12 | Best:   138.00 | Mean:    73.87 | Fidelity: 0.0007 | Drift: 0.0042
+Gen   13 | Best:   143.00 | Mean:    86.82 | Fidelity: 0.0011 | Drift: 0.0043
+Gen   14 | Best:   181.00 | Mean:    87.20 | Fidelity: 0.0009 | Drift: 0.0035
+Gen   15 | Best:   142.33 | Mean:    79.52 | Fidelity: 0.0007 | Drift: 0.0042
+Gen   16 | Best:   272.33 | Mean:   105.52 | Fidelity: 0.0006 | Drift: 0.0044
+Gen   17 | Best:   253.67 | Mean:   112.87 | Fidelity: 0.0006 | Drift: 0.0044
+Gen   18 | Best:   163.33 | Mean:   101.63 | Fidelity: 0.0007 | Drift: 0.0040
+Gen   19 | Best:   230.67 | Mean:   102.15 | Fidelity: 0.0006 | Drift: 0.0040
+
+Done in 9.3s
+Final best:  230.67
+Final mean:  102.15
+Final mean fidelity: 0.0006
+Final mean drift: 0.0040
+Results saved: results/self_replication/CartPole-v1_gaussian_ql0.0_s42.json
+Plot saved: results/self_replication/CartPole-v1_gaussian_ql0.0_s42.png

@@ -1,0 +1,36 @@
+============================================================
+Neural Mutator Evolution (True Self-Replication)
+============================================================
+Environment: CartPole-v1 (obs=4, act=2)
+Genome: 4610 policy params + 281537 mutator params = 286147 total
+Mutator type: transformer, Quine lambda: 0.0
+Population: 15, Generations: 20
+
+Gen    0 | Best:    27.00 | Mean:    10.89 | Fidelity: 0.0000 | Drift: 0.0000
+Gen    1 | Best:    44.33 | Mean:    19.18 | Fidelity: 0.1978 | Drift: 39.7687
+Gen    2 | Best:    44.67 | Mean:    26.84 | Fidelity: 0.2634 | Drift: 37.1872
+Gen    3 | Best:    52.33 | Mean:    36.31 | Fidelity: 0.2440 | Drift: 37.1646
+Gen    4 | Best:   151.00 | Mean:    57.27 | Fidelity: 0.2477 | Drift: 37.2021
+Gen    5 | Best:   153.33 | Mean:    73.98 | Fidelity: 0.2231 | Drift: 37.2215
+Gen    6 | Best:   341.67 | Mean:   141.93 | Fidelity: 0.1858 | Drift: 37.2317
+Gen    7 | Best:   361.33 | Mean:   149.27 | Fidelity: 0.1621 | Drift: 37.2079
+Gen    8 | Best:   373.33 | Mean:   167.89 | Fidelity: 0.1463 | Drift: 37.2424
+Gen    9 | Best:   297.67 | Mean:   122.71 | Fidelity: 0.1385 | Drift: 37.2418
+Gen   10 | Best:   353.00 | Mean:   167.27 | Fidelity: 0.1302 | Drift: 37.2417
+Gen   11 | Best:   343.33 | Mean:   190.67 | Fidelity: 0.1186 | Drift: 37.2425
+Gen   12 | Best:   310.00 | Mean:   139.04 | Fidelity: 0.1034 | Drift: 37.2521
+Gen   13 | Best:   323.67 | Mean:   125.09 | Fidelity: 0.0971 | Drift: 37.2505
+Gen   14 | Best:   293.00 | Mean:   152.51 | Fidelity: 0.0887 | Drift: 37.2581
+Gen   15 | Best:   345.67 | Mean:   115.98 | Fidelity: 0.0808 | Drift: 37.2631
+Gen   16 | Best:   382.67 | Mean:   137.84 | Fidelity: 0.0748 | Drift: 37.2518
+Gen   17 | Best:   348.00 | Mean:   118.40 | Fidelity: 0.0668 | Drift: 37.2614
+Gen   18 | Best:   150.33 | Mean:    79.98 | Fidelity: 0.0615 | Drift: 37.2558
+Gen   19 | Best:   272.33 | Mean:   101.51 | Fidelity: 0.0543 | Drift: 37.2595
+
+Done in 51.9s
+Final best:  272.33
+Final mean:  101.51
+Final mean fidelity: 0.0543
+Final mean drift: 37.2595
+Results saved: results/self_replication/CartPole-v1_transformer_ql0.0_s42.json
+Plot saved: results/self_replication/CartPole-v1_transformer_ql0.0_s42.png
