@@ -357,19 +357,36 @@ class GaussianMutator(nn.Module):
         self.dummy = nn.Parameter(torch.tensor(0.0), requires_grad=False)
 
     def mutate_genome(self, flat_weights: torch.Tensor,
-                      weight_coords: torch.Tensor = None) -> torch.Tensor:
+                      weight_coords: torch.Tensor = None,
+                      other_weights: torch.Tensor = None) -> torch.Tensor:
+        if other_weights is not None:
+            # Crossover mode: random interpolation per weight + noise
+            alpha = torch.rand_like(flat_weights)
+            blended = alpha * flat_weights + (1 - alpha) * other_weights
+            noise = torch.randn_like(blended) * self.base_scale
+            return blended + noise
         noise = torch.randn_like(flat_weights) * self.base_scale
         return flat_weights + noise
 
 
 class ChunkMutator(nn.Module):
-    """Chunk-based MLP mutator."""
+    """Chunk-based MLP mutator with learned crossover."""
 
     def __init__(self, chunk_size: int = 64, hidden: int = 128):
         super().__init__()
         self.chunk_size = chunk_size
+        # Single-parent mutation network
         self.net = nn.Sequential(
             nn.Linear(chunk_size, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, chunk_size),
+            nn.Tanh(),
+        )
+        # Dual-parent crossover network: sees both parents' chunks
+        self.cross_net = nn.Sequential(
+            nn.Linear(chunk_size * 2, hidden),
             nn.Tanh(),
             nn.Linear(hidden, hidden),
             nn.Tanh(),
@@ -379,11 +396,26 @@ class ChunkMutator(nn.Module):
         self.mutation_scale = nn.Parameter(torch.tensor(0.01))
 
     def mutate_genome(self, flat_weights: torch.Tensor,
-                      weight_coords: torch.Tensor = None) -> torch.Tensor:
+                      weight_coords: torch.Tensor = None,
+                      other_weights: torch.Tensor = None) -> torch.Tensor:
         n = flat_weights.shape[0]
         cs = self.chunk_size
         pad_len = (cs - n % cs) % cs
         padded = torch.cat([flat_weights, torch.zeros(pad_len)])
+
+        if other_weights is not None:
+            # Crossover mode: feed both parents into cross_net
+            other_pad = torch.cat([other_weights, torch.zeros(max(0, padded.shape[0] - other_weights.shape[0]))])
+            other_pad = other_pad[:padded.shape[0]]
+            chunks_a = padded.view(-1, cs)
+            chunks_b = other_pad.view(-1, cs)
+            combined = torch.cat([chunks_a, chunks_b], dim=1)  # [n_chunks, cs*2]
+            delta = self.cross_net(combined) * self.mutation_scale
+            delta = torch.clamp(delta, -0.1, 0.1)
+            # Start from midpoint of parents
+            base = (chunks_a + chunks_b) / 2
+            mutated = base + delta
+            return mutated.view(-1)[:n]
 
         chunks = padded.view(-1, cs)
         delta = self.net(chunks) * self.mutation_scale
@@ -438,12 +470,31 @@ class ErrorCorrectorMutator(nn.Module):
         self.explore_scale = nn.Parameter(torch.tensor(0.005))
 
     def mutate_genome(self, flat_weights: torch.Tensor,
-                      weight_coords: torch.Tensor = None) -> torch.Tensor:
+                      weight_coords: torch.Tensor = None,
+                      other_weights: torch.Tensor = None) -> torch.Tensor:
         n = flat_weights.shape[0]
         cs = self.chunk_size
         pad_len = (cs - n % cs) % cs
         padded = torch.cat([flat_weights, torch.zeros(pad_len)])
         
+        if other_weights is not None:
+            # Crossover: encode both parents, use corrector to blend toward reference
+            other_pad = torch.cat([other_weights, torch.zeros(max(0, padded.shape[0] - other_weights.shape[0]))])
+            other_pad = other_pad[:padded.shape[0]]
+            chunks_a = padded.view(-1, cs)
+            chunks_b = other_pad.view(-1, cs)
+            base = (chunks_a + chunks_b) / 2
+            encoded = self.encoder(base)
+            num_chunks = encoded.shape[0]
+            ref = self.reference.unsqueeze(0).expand(num_chunks, -1)
+            diff = encoded - ref
+            corrector_input = torch.cat([encoded, ref, diff], dim=1)
+            correction = self.corrector(corrector_input) * self.correction_scale
+            correction = torch.clamp(correction, -0.1, 0.1)
+            noise = torch.randn_like(base) * self.explore_scale
+            mutated = base + correction + noise
+            return mutated.view(-1)[:n]
+
         chunks = padded.view(-1, cs)
         num_chunks = chunks.shape[0]
         
@@ -471,12 +522,13 @@ class ErrorCorrectorMutator(nn.Module):
 
 
 class TransformerMutator(nn.Module):
-    """Transformer-based mutator."""
+    """Transformer-based mutator with learned crossover via cross-attention."""
 
     def __init__(self, chunk_size: int = 64, n_heads: int = 4, n_layers: int = 2,
                  d_model: int = 128):
         super().__init__()
         self.chunk_size = chunk_size
+        self.d_model = d_model
         self.embed = nn.Linear(chunk_size, d_model)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model, nhead=n_heads, dim_feedforward=d_model * 2,
@@ -485,13 +537,32 @@ class TransformerMutator(nn.Module):
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
         self.project = nn.Linear(d_model, chunk_size)
         self.mutation_scale = nn.Parameter(torch.tensor(0.01))
+        # Cross-attention for dual-parent crossover
+        self.cross_embed = nn.Linear(chunk_size * 2, d_model)
 
     def mutate_genome(self, flat_weights: torch.Tensor,
-                      weight_coords: torch.Tensor = None) -> torch.Tensor:
+                      weight_coords: torch.Tensor = None,
+                      other_weights: torch.Tensor = None) -> torch.Tensor:
         n = flat_weights.shape[0]
         cs = self.chunk_size
         pad_len = (cs - n % cs) % cs
         padded = torch.cat([flat_weights, torch.zeros(pad_len)])
+
+        if other_weights is not None:
+            # Crossover mode: interleave both parents' chunks as transformer input
+            other_pad = torch.cat([other_weights, torch.zeros(max(0, padded.shape[0] - other_weights.shape[0]))])
+            other_pad = other_pad[:padded.shape[0]]
+            chunks_a = padded.view(-1, cs)
+            chunks_b = other_pad.view(-1, cs)
+            # Concatenate per-chunk and embed
+            combined = torch.cat([chunks_a, chunks_b], dim=1)  # [n_chunks, cs*2]
+            embedded = self.cross_embed(combined).unsqueeze(0)  # [1, n_chunks, d_model]
+            transformed = self.transformer(embedded)
+            delta = self.project(transformed) * self.mutation_scale
+            delta = torch.clamp(delta, -0.1, 0.1)
+            base = ((chunks_a + chunks_b) / 2).unsqueeze(0)
+            mutated = (base + delta).view(-1)[:n]
+            return mutated
 
         chunks = padded.view(1, -1, cs)
         embedded = self.embed(chunks)
@@ -816,60 +887,87 @@ class Genome:
     @torch.no_grad()
     def crossover(self, other: 'Genome', generation: int = 0,
                   max_generations: int = 100) -> 'Genome':
-        """Crossover with learned speciation check and self-replication stabilization.
+        """Crossover where the mutator sees BOTH parents and decides how to combine them.
+        
+        The mutator receives both parents' full weight vectors and outputs
+        a child genome. This lets the mutator learn crossover strategies
+        rather than using fixed rules.
         
         For FlexiblePolicy: uses the fitter parent's architecture (self is assumed fitter).
         """
-        # For flexible policies with different architectures, use self's architecture
+        # Use self's (fitter parent) architecture for the child
         child_policy = self._clone_policy()
         n_policy = sum(p.numel() for p in child_policy.parameters())
-        n_mutator = other.num_mutator_params()
-        n_compat = other.num_compat_params()
         
-        # Use self's policy weights (possibly resized) + other's mutator/compat
+        # Get both parents' full flat weights
+        my_flat = self.get_flat_weights()
+        other_flat = other.get_flat_weights()
+        
+        # Pad to same size (flex genomes may differ)
+        max_len = max(my_flat.shape[0], other_flat.shape[0])
+        if my_flat.shape[0] < max_len:
+            my_flat = torch.cat([my_flat, torch.zeros(max_len - my_flat.shape[0])])
+        if other_flat.shape[0] < max_len:
+            other_flat = torch.cat([other_flat, torch.zeros(max_len - other_flat.shape[0])])
+        
+        decay = max(0.2, 1.0 - 0.8 * (generation / max(max_generations, 1)))
+        
+        # Let the fitter parent's mutator see both genomes and decide
+        mutated_full = self.mutator.mutate_genome(my_flat, other_weights=other_flat)
+        
+        # Extract child weights from mutator output
+        n_mutator = self.num_mutator_params()
+        n_compat = self.num_compat_params()
+        
+        # Policy weights from mutator output
+        child_policy_weights = mutated_full[:n_policy]
+        
+        # Apply decay to the delta from self's weights
         my_policy = self.get_flat_policy_weights()
-        # Resize if needed
         if my_policy.shape[0] != n_policy:
             resized = torch.zeros(n_policy)
             copy_len = min(my_policy.shape[0], n_policy)
             resized[:copy_len] = my_policy[:copy_len]
             my_policy = resized
-
-        other_meta = torch.cat([other.get_flat_mutator_weights(), other.get_flat_compat_weights()])
-        combined = torch.cat([my_policy, other_meta])
-
-        decay = max(0.2, 1.0 - 0.8 * (generation / max(max_generations, 1)))
-
-        mutated_full = other.mutator.mutate_genome(combined)
-
-        full_delta = mutated_full - combined
-        policy_delta = full_delta[:n_policy] * decay
-        meta_delta = full_delta[n_policy:n_policy + n_mutator + n_compat]
-        if meta_delta.shape[0] < n_mutator + n_compat:
-            meta_delta = torch.cat([meta_delta, torch.zeros(n_mutator + n_compat - meta_delta.shape[0])])
-        meta_delta = meta_delta[:n_mutator + n_compat]
-        
-        mutator_d = meta_delta[:n_mutator] * decay * self.MUTATOR_SELF_RATE
-        mutator_delta_norm = torch.norm(mutator_d).item()
-        
-        if n_compat > 0:
-            compat_noise = torch.randn(n_compat) * 0.05 * decay
-            meta_delta = torch.cat([mutator_d, compat_noise])
-        else:
-            meta_delta = mutator_d
-
+        policy_delta = (child_policy_weights - my_policy) * decay
         new_policy = my_policy + policy_delta
-        new_meta = other_meta + meta_delta
-        new_flat = torch.cat([new_policy, new_meta])
+        
+        # Mutator weights: blend from both parents with asymmetric rate
+        my_mutator = self.get_flat_mutator_weights()
+        other_mutator = other.get_flat_mutator_weights()
+        # Resize if needed
+        n_mut = min(my_mutator.shape[0], other_mutator.shape[0])
+        mutator_blend = (my_mutator[:n_mut] + other_mutator[:n_mut]) / 2
+        mutator_noise = torch.randn(n_mut) * 0.02 * decay * self.MUTATOR_SELF_RATE
+        new_mutator = mutator_blend + mutator_noise
+        if n_mut < n_mutator:
+            new_mutator = torch.cat([new_mutator, my_mutator[n_mut:]])
+        
+        mutator_delta_norm = torch.norm(new_mutator - my_mutator[:new_mutator.shape[0]]).item()
+        
+        # Compat weights
+        if n_compat > 0:
+            my_compat = self.get_flat_compat_weights()
+            other_compat = other.get_flat_compat_weights()
+            n_c = min(my_compat.shape[0], other_compat.shape[0])
+            new_compat = (my_compat[:n_c] + other_compat[:n_c]) / 2
+            compat_noise = torch.randn(n_c) * 0.05 * decay
+            new_compat = new_compat + compat_noise
+            if n_c < n_compat:
+                new_compat = torch.cat([new_compat, my_compat[n_c:]])
+        else:
+            new_compat = torch.tensor([])
+        
+        new_flat = torch.cat([new_policy, new_mutator, new_compat])
         new_flat = torch.clamp(new_flat, -5.0, 5.0)
-
-        fidelity = torch.norm(new_meta[:n_mutator] - other_meta[:n_mutator]).item()
-
+        
+        fidelity = torch.norm(mutator_noise).item()
+        
         child = Genome(
             policy=child_policy,
-            mutator=other._clone_mutator(),
-            mutator_type=other.mutator_type,
-            compat_net=other._clone_compat() if other.compat_net else None,
+            mutator=self._clone_mutator(),
+            mutator_type=self.mutator_type,
+            compat_net=self._clone_compat() if self.compat_net else None,
         )
         child.set_flat_weights(new_flat)
         child.self_replication_fidelity = fidelity
