@@ -27,21 +27,42 @@ def main():
     parser.add_argument('--pop-size', type=int, default=30, help='Population size')
     parser.add_argument('--generations', type=int, default=100, help='Number of generations')
     parser.add_argument('--episodes', type=int, default=5, help='Eval episodes per genome')
+    parser.add_argument('--max-steps', type=int, default=0,
+                        help='Max steps per episode (0 = auto: 300 for SnakePixels, else 1000)')
+    parser.add_argument('--adaptive-max-steps', action='store_true',
+                        help='For SnakePixels: increase max steps when mean raw score > 5')
     parser.add_argument('--crossover-rate', type=float, default=0.3, help='Crossover probability')
     parser.add_argument('--hidden', type=int, default=64, help='Policy hidden size')
     parser.add_argument('--chunk-size', type=int, default=64, help='Mutator chunk size')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--output', default='results', help='Output directory')
-    parser.add_argument('--speciation', action='store_true',
-                        help='Enable learned speciation (compat net in genome)')
+    parser.add_argument('--speciation', dest='speciation', action='store_true',
+                        help='Enable learned speciation (compat net in genome) [default: on]')
+    parser.add_argument('--no-speciation', dest='speciation', action='store_false',
+                        help='Disable learned speciation')
+    parser.set_defaults(speciation=True)
     parser.add_argument('--compat-threshold', type=float, default=0.5,
                         help='Compatibility threshold for crossover (0-1)')
-    parser.add_argument('--flex', action='store_true',
-                        help='Enable flexible architecture with structural mutations')
-    parser.add_argument('--complexity-cost', type=float, default=0.0,
-                        help='Per-parameter fitness penalty (encourages smaller networks)')
+    parser.add_argument('--flex', dest='flex', action='store_true',
+                        help='Enable flexible architecture with structural mutations [default: on]')
+    parser.add_argument('--no-flex', dest='flex', action='store_false',
+                        help='Disable flexible architecture mutations')
+    parser.set_defaults(flex=True)
+    parser.add_argument('--complexity-cost', type=float, default=1e-4,
+                        help='Per-parameter fitness penalty (encourages smaller networks) [default: 1e-4]')
     parser.add_argument('--workers', type=int, default=1,
                         help='Parallel workers for genome evaluation (default: 1)')
+
+    # Fleet eval (ZeroMQ). When enabled, this process acts as the master/dispatcher.
+    parser.add_argument('--fleet-bind', type=str, default='',
+                        help='Enable fleet evaluation: bind ROUTER on this address (e.g. tcp://*:5555).')
+    parser.add_argument('--fleet-min-workers', type=int, default=2,
+                        help='Minimum workers to wait for when fleet eval is enabled.')
+    parser.add_argument('--fleet-batch', type=int, default=8,
+                        help='Genomes per job sent to each worker.')
+    parser.add_argument('--fleet-startup-timeout', type=float, default=60.0,
+                        help='Seconds to wait for fleet workers to connect.')
+
     parser.add_argument('--optimized', action='store_true',
                         help='Use optimized evolution (adaptive mutation, stagnation detection)')
     args = parser.parse_args()
@@ -55,38 +76,64 @@ def main():
     print(title)
     print(f"{'='*60}")
 
+    # Optional fleet evaluator (ZeroMQ)
+    fleet = None
+    if args.fleet_bind:
+        from fleet_zmq.evaluator import FleetZmqEvaluator
+        fleet = FleetZmqEvaluator(
+            bind=args.fleet_bind,
+            min_workers=args.fleet_min_workers,
+            batch_size=args.fleet_batch,
+            startup_timeout_s=args.fleet_startup_timeout,
+            verbose=True,
+        )
+
     start = time.time()
-    if args.optimized:
-        from .optimized_evolution import run_optimized_evolution
-        history = run_optimized_evolution(
-            env_id=args.env,
-            pop_size=args.pop_size,
-            generations=args.generations,
-            mutator_type=args.mutator,
-            n_eval_episodes=args.episodes,
-            crossover_rate=args.crossover_rate,
-            hidden=args.hidden,
-            chunk_size=args.chunk_size,
-            seed=args.seed,
-        )
-    else:
-        history = run_evolution(
-            env_id=args.env,
-            pop_size=args.pop_size,
-            generations=args.generations,
-            mutator_type=args.mutator,
-            n_eval_episodes=args.episodes,
-            crossover_rate=args.crossover_rate,
-            hidden=args.hidden,
-            chunk_size=args.chunk_size,
-            seed=args.seed,
-            speciation=args.speciation,
-            compat_threshold=args.compat_threshold,
-            flex=args.flex,
-            complexity_cost=args.complexity_cost,
-            output_dir=args.output,
-            n_workers=args.workers,
-        )
+    try:
+        if args.optimized:
+            from .optimized_evolution import run_optimized_evolution
+            history = run_optimized_evolution(
+                env_id=args.env,
+                pop_size=args.pop_size,
+                generations=args.generations,
+                mutator_type=args.mutator,
+                n_eval_episodes=args.episodes,
+                crossover_rate=args.crossover_rate,
+                hidden=args.hidden,
+                chunk_size=args.chunk_size,
+                seed=args.seed,
+            )
+        else:
+            # Resolve max steps default
+            if args.max_steps and args.max_steps > 0:
+                max_steps = int(args.max_steps)
+            else:
+                max_steps = 300 if args.env.startswith('SnakePixels') else 1000
+
+            history = run_evolution(
+                env_id=args.env,
+                pop_size=args.pop_size,
+                generations=args.generations,
+                mutator_type=args.mutator,
+                n_eval_episodes=args.episodes,
+                max_steps=max_steps,
+                adaptive_max_steps=bool(args.adaptive_max_steps),
+                crossover_rate=args.crossover_rate,
+                hidden=args.hidden,
+                chunk_size=args.chunk_size,
+                seed=args.seed,
+                speciation=args.speciation,
+                compat_threshold=args.compat_threshold,
+                flex=args.flex,
+                complexity_cost=args.complexity_cost,
+                output_dir=args.output,
+                n_workers=args.workers,
+                fleet=fleet,
+            )
+    finally:
+        if fleet is not None:
+            fleet.close()
+
     elapsed = time.time() - start
 
     print(f"\nDone in {elapsed:.1f}s")

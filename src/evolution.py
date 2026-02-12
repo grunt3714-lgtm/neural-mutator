@@ -10,12 +10,14 @@ Features:
 
 import os
 import torch
-from multiprocessing import Pool as _Pool
+import multiprocessing as mp
+from multiprocessing.pool import Pool as _Pool
 import numpy as np
 import gymnasium as gym
 from typing import List, Dict
 from .genome import (Genome, Policy, FlexiblePolicy, ChunkMutator, TransformerMutator, 
                       GaussianMutator, ErrorCorrectorMutator, CompatibilityNet)
+from .snake_env import ensure_snake_registered
 
 # Module-level pool for reuse across generations
 _worker_pool = None
@@ -23,12 +25,26 @@ _worker_pool_size = 0
 
 
 def evaluate_genome(genome: Genome, env_id: str, n_episodes: int = 5,
-                    max_steps: int = 1000) -> float:
-    """Evaluate a genome's policy on an environment. Returns mean reward."""
-    env = gym.make(env_id)
+                    max_steps: int = 1000,
+                    seeds: List[int] | None = None) -> float:
+    """Evaluate a genome's policy on an environment. Returns mean reward.
+
+    If `seeds` is provided, it is used for deterministic episode resets.
+    """
+    ensure_snake_registered()
+
+    # For SnakePixels we want to be able to control episode length dynamically.
+    if env_id.startswith('SnakePixels'):
+        env = gym.make(env_id, max_episode_steps=max_steps, max_steps=max_steps)
+    else:
+        env = gym.make(env_id)
+
     rewards = []
-    for _ in range(n_episodes):
-        obs, _ = env.reset()
+    for ep in range(n_episodes):
+        seed = None
+        if seeds is not None and ep < len(seeds):
+            seed = int(seeds[ep])
+        obs, _ = env.reset(seed=seed)
         total_reward = 0.0
         for _ in range(max_steps):
             action = genome.policy.act(obs)
@@ -47,31 +63,63 @@ def evaluate_genome(genome: Genome, env_id: str, n_episodes: int = 5,
 
 def _eval_worker(args):
     """Worker for parallel genome evaluation. Receives serialized genome bytes."""
-    genome_bytes, env_id, n_episodes, max_steps = args
-    import io
+    genome_bytes, env_id, n_episodes, max_steps, seeds = args
+
+    # Avoid thread oversubscription / fork-related issues in PyTorch.
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+    # Ensure custom envs are registered inside the worker process.
+    ensure_snake_registered()
+
     genome = Genome.load_bytes(genome_bytes)
-    return evaluate_genome(genome, env_id, n_episodes, max_steps)
+    return evaluate_genome(genome, env_id, n_episodes, max_steps, seeds=seeds)
 
 
 def _get_pool(n_workers: int) -> _Pool:
-    """Get or create a persistent worker pool."""
+    """Get or create a persistent worker pool.
+
+    IMPORTANT: Use the 'spawn' start method for stability with PyTorch + Gym.
+    The default 'fork' can deadlock (especially after importing torch).
+    """
     global _worker_pool, _worker_pool_size
     if _worker_pool is None or _worker_pool_size != n_workers:
         if _worker_pool is not None:
             _worker_pool.terminate()
-        _worker_pool = _Pool(n_workers)
+            _worker_pool = None
+
+        ctx = mp.get_context("spawn")
+        _worker_pool = ctx.Pool(processes=n_workers)
         _worker_pool_size = n_workers
     return _worker_pool
 
 
 def evaluate_population(population: List[Genome], env_id: str,
                         n_episodes: int = 5, max_steps: int = 1000,
-                        n_workers: int = 1) -> List[float]:
-    """Evaluate all genomes, optionally in parallel."""
-    if n_workers <= 1:
-        return [evaluate_genome(g, env_id, n_episodes, max_steps) for g in population]
+                        n_workers: int = 1,
+                        fleet: object = None,
+                        seeds_per_genome: List[List[int]] | None = None) -> List[float]:
+    """Evaluate all genomes.
 
-    args = [(g.to_bytes(), env_id, n_episodes, max_steps) for g in population]
+    Modes:
+    - fleet evaluator (ZeroMQ): distribute evaluation across machines.
+    - local multiprocessing pool: distribute across local processes.
+    - single-process: evaluate sequentially.
+    """
+    if seeds_per_genome is None:
+        seeds_per_genome = [None] * len(population)  # type: ignore
+
+    # Fleet evaluator: expects an object with evaluate_population(genomes_bytes, env_id, n_episodes, max_steps, seeds_per_genome)
+    if fleet is not None:
+        genomes_bytes = [g.to_bytes() for g in population]
+        return fleet.evaluate_population(genomes_bytes, env_id, n_episodes, max_steps, seeds_per_genome=seeds_per_genome)  # type: ignore
+
+    if n_workers <= 1:
+        return [evaluate_genome(g, env_id, n_episodes, max_steps, seeds=seeds) for g, seeds in zip(population, seeds_per_genome)]
+
+    args = [(g.to_bytes(), env_id, n_episodes, max_steps, seeds) for g, seeds in zip(population, seeds_per_genome)]
     pool = _get_pool(n_workers)
     fitnesses = pool.map(_eval_worker, args)
     return fitnesses
@@ -242,7 +290,10 @@ def evolve_generation(population: List[Genome], crossover_rate: float = 0.3,
 def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
 
                   generations: int = 100, mutator_type: str = 'chunk',
-                  n_eval_episodes: int = 5, crossover_rate: float = 0.3,
+                  n_eval_episodes: int = 5,
+                  max_steps: int = 1000,
+                  adaptive_max_steps: bool = False,
+                  crossover_rate: float = 0.3,
                   hidden: int = 64, chunk_size: int = 64,
                   log_interval: int = 1, seed: int = 42,
                   speciation: bool = False,
@@ -250,7 +301,8 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
                   flex: bool = False,
                   complexity_cost: float = 0.0,
                   output_dir: str = None,
-                  n_workers: int = 1) -> Dict:
+                  n_workers: int = 1,
+                  fleet: object = None) -> Dict:
     """
     Main evolution loop with true self-replication.
 
@@ -261,6 +313,7 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+    ensure_snake_registered()
     env = gym.make(env_id)
     obs_dim = env.observation_space.shape[0]
     if isinstance(env.action_space, gym.spaces.Discrete):
@@ -311,10 +364,32 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
     if n_workers > 1:
         print(f"Parallel evaluation: {n_workers} workers")
 
+    eval_max_steps = int(max_steps)
+
     for gen in range(generations):
         # Evaluate fitness — pure environment reward
+        # Deterministic seeds per genome per episode for stable selection pressure across fleet.
+        seeds_per_genome = []
+        for i in range(len(population)):
+            seeds = []
+            for ep in range(int(n_eval_episodes)):
+                s = (seed * 1_000_000 + gen * 10_000 + i * 31 + ep) & 0xFFFFFFFF
+                seeds.append(int(s))
+            seeds_per_genome.append(seeds)
+
         raw_fitnesses = evaluate_population(population, env_id, n_eval_episodes,
-                                            n_workers=n_workers)
+                                            max_steps=eval_max_steps,
+                                            n_workers=n_workers, fleet=fleet,
+                                            seeds_per_genome=seeds_per_genome)
+
+        # SnakePixels: if mean raw score crosses threshold, increase episode length
+        if adaptive_max_steps and env_id.startswith('SnakePixels'):
+            raw_mean = float(np.mean(raw_fitnesses)) if len(raw_fitnesses) else 0.0
+            if raw_mean > 5.0 and eval_max_steps < 2000:
+                new_steps = min(2000, eval_max_steps * 2)
+                if new_steps != eval_max_steps:
+                    eval_max_steps = new_steps
+                    print(f"[adaptive] mean raw {raw_mean:.2f} > 5 → increasing max_steps to {eval_max_steps}")
         for g, raw in zip(population, raw_fitnesses):
             g.fitness = raw
         
