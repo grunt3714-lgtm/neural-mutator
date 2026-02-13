@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use rand::Rng;
 use std::sync::mpsc;
 
 #[repr(C)]
@@ -18,7 +19,8 @@ struct GpuState {
     truncated: u32,
     length: u32,
     action: i32,
-    _pad: [u32; 2],
+    rng_state: u32,
+    _pad: [u32; 1],
 }
 
 struct GpuRuntime {
@@ -88,8 +90,8 @@ struct State {{
   truncated: u32,
   length: u32,
   action: i32,
+  rng_state: u32,
   pad0: u32,
-  pad1: u32,
 }};
 
 @group(0) @binding(0) var<storage, read_write> state: State;
@@ -98,6 +100,14 @@ struct State {{
 
 fn rgb(r: u32, g: u32, b: u32) -> u32 {{
   return r | (g << 8u) | (b << 16u);
+}}
+
+fn pcg_next() -> u32 {{
+  var s = state.rng_state;
+  s = s * 747796405u + 2891336453u;
+  state.rng_state = s;
+  let word = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+  return (word >> 22u) ^ word;
 }}
 
 fn is_occupied(rr: i32, cc: i32, len: u32) -> bool {{
@@ -233,30 +243,48 @@ fn main() {{
     state.reward = 1.0;
     let cells = state.grid_size * state.grid_size;
     let min_dist: i32 = 4;
-    // First pass: find far free cell (Manhattan dist >= 4 from head)
-    var found_far = false;
+    // Count far free cells and any free cells
+    var far_count: u32 = 0u;
+    var any_count: u32 = 0u;
     for (var ci: u32 = 0u; ci < cells; ci = ci + 1u) {{
       let rr = i32(ci / state.grid_size);
       let cc = i32(ci % state.grid_size);
       if (!is_occupied(rr, cc, state.length)) {{
+        any_count = any_count + 1u;
         let d = abs(rr - state.head_r) + abs(cc - state.head_c);
         if (d >= min_dist) {{
-          state.food_r = rr;
-          state.food_c = cc;
-          found_far = true;
-          break;
+          far_count = far_count + 1u;
         }}
       }}
     }}
-    // Fallback: any free cell
-    if (!found_far) {{
+    // Pick random index among candidates
+    var use_far = far_count > 0u;
+    var target_count = far_count;
+    if (!use_far) {{
+      target_count = any_count;
+    }}
+    if (target_count > 0u) {{
+      let pick = pcg_next() % target_count;
+      var idx: u32 = 0u;
       for (var ci: u32 = 0u; ci < cells; ci = ci + 1u) {{
         let rr = i32(ci / state.grid_size);
         let cc = i32(ci % state.grid_size);
         if (!is_occupied(rr, cc, state.length)) {{
-          state.food_r = rr;
-          state.food_c = cc;
-          break;
+          var valid = true;
+          if (use_far) {{
+            let d = abs(rr - state.head_r) + abs(cc - state.head_c);
+            if (d < min_dist) {{
+              valid = false;
+            }}
+          }}
+          if (valid) {{
+            if (idx == pick) {{
+              state.food_r = rr;
+              state.food_c = cc;
+              break;
+            }}
+            idx = idx + 1u;
+          }}
         }}
       }}
     }}
@@ -496,6 +524,7 @@ pub struct SnakeGpuCore {
     body: Vec<(i32, i32)>,
     food: (i32, i32),
     done: bool,
+    rng_state: u32,
     backend: String,
     adapter_name: String,
     execution_mode: String,
@@ -506,7 +535,6 @@ impl SnakeGpuCore {
     fn spawn_food(&mut self) {
         let g = self.grid_size as i32;
         let min_dist: i32 = 4;
-        // First pass: free cells with Manhattan distance >= min_dist from head
         let mut far_cells = Vec::new();
         let mut any_free = Vec::new();
         for r in 0..g {
@@ -520,10 +548,10 @@ impl SnakeGpuCore {
                 }
             }
         }
-        // Prefer far cells; fall back to any free cell
         let candidates = if far_cells.is_empty() { &any_free } else { &far_cells };
-        if let Some(&cell) = candidates.first() {
-            self.food = cell;
+        if !candidates.is_empty() {
+            let idx = rand::rng().random_range(0..candidates.len());
+            self.food = candidates[idx];
         }
     }
 
@@ -543,7 +571,8 @@ impl SnakeGpuCore {
             truncated: 0,
             length: self.body.len() as u32,
             action,
-            _pad: [0, 0],
+            rng_state: self.rng_state,
+            _pad: [0],
         }
     }
 
@@ -563,6 +592,7 @@ impl SnakeGpuCore {
         self.head_c = state.head_c;
         self.food = (state.food_r, state.food_c);
         self.done = state.done != 0;
+        self.rng_state = state.rng_state;
     }
 
     fn pixels_u32_to_rgb(pixels: Vec<u32>) -> Vec<u8> {
@@ -688,6 +718,7 @@ impl SnakeGpuCore {
             body: vec![(c, c), (c, c - 1), (c, c - 2)],
             food: (0, 0),
             done: false,
+            rng_state: 12345,
             backend: "None".to_string(),
             adapter_name: "No adapter".to_string(),
             execution_mode: "cpu".to_string(),
@@ -721,6 +752,7 @@ impl SnakeGpuCore {
         self.head_c = c;
         self.body = vec![(c, c), (c, c - 1), (c, c - 2)];
         self.done = false;
+        self.rng_state = rand::rng().random::<u32>() | 1; // ensure nonzero
         self.spawn_food();
 
         if let Some(gpu) = &self.gpu {

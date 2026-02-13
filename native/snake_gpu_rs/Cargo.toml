@@ -13,3 +13,4 @@ wgpu = "22"
 pollster = "0.3"
 
 bytemuck = { version = "1.16", features = ["derive"] }
+rand = "0.9"
