@@ -232,13 +232,32 @@ fn main() {{
   if (ate) {{
     state.reward = 1.0;
     let cells = state.grid_size * state.grid_size;
+    let min_dist: i32 = 4;
+    // First pass: find far free cell (Manhattan dist >= 4 from head)
+    var found_far = false;
     for (var ci: u32 = 0u; ci < cells; ci = ci + 1u) {{
       let rr = i32(ci / state.grid_size);
       let cc = i32(ci % state.grid_size);
       if (!is_occupied(rr, cc, state.length)) {{
-        state.food_r = rr;
-        state.food_c = cc;
-        break;
+        let d = abs(rr - state.head_r) + abs(cc - state.head_c);
+        if (d >= min_dist) {{
+          state.food_r = rr;
+          state.food_c = cc;
+          found_far = true;
+          break;
+        }}
+      }}
+    }}
+    // Fallback: any free cell
+    if (!found_far) {{
+      for (var ci: u32 = 0u; ci < cells; ci = ci + 1u) {{
+        let rr = i32(ci / state.grid_size);
+        let cc = i32(ci % state.grid_size);
+        if (!is_occupied(rr, cc, state.length)) {{
+          state.food_r = rr;
+          state.food_c = cc;
+          break;
+        }}
       }}
     }}
   }}
@@ -486,13 +505,25 @@ pub struct SnakeGpuCore {
 impl SnakeGpuCore {
     fn spawn_food(&mut self) {
         let g = self.grid_size as i32;
-        'outer: for r in 0..g {
+        let min_dist: i32 = 4;
+        // First pass: free cells with Manhattan distance >= min_dist from head
+        let mut far_cells = Vec::new();
+        let mut any_free = Vec::new();
+        for r in 0..g {
             for c in 0..g {
                 if !self.body.iter().any(|&(br, bc)| br == r && bc == c) {
-                    self.food = (r, c);
-                    break 'outer;
+                    any_free.push((r, c));
+                    let dist = (r - self.head_r).abs() + (c - self.head_c).abs();
+                    if dist >= min_dist {
+                        far_cells.push((r, c));
+                    }
                 }
             }
+        }
+        // Prefer far cells; fall back to any free cell
+        let candidates = if far_cells.is_empty() { &any_free } else { &far_cells };
+        if let Some(&cell) = candidates.first() {
+            self.food = cell;
         }
     }
 
