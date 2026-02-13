@@ -4,8 +4,6 @@ import gymnasium as gym
 from gymnasium import spaces
 from gymnasium.envs.registration import register
 
-import os
-
 try:
     from snake_gpu_rs import SnakeGpuCore  # type: ignore
 except Exception:
@@ -54,8 +52,7 @@ class SnakePixelsEnv(gym.Env):
         self.gpu_adapter = "none"
         self._last_obs = None
         self.compute_mode = "cpu"
-        force_cpu = os.getenv("SNAKE_FORCE_CPU", "0") == "1"
-        if SnakeGpuCore is not None and not force_cpu:
+        if SnakeGpuCore is not None:
             try:
                 self._rust_core = SnakeGpuCore(self.grid_size, self.max_steps)
                 b, a = self._rust_core.gpu_info()
