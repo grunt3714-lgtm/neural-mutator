@@ -65,6 +65,13 @@ class SnakePixelsEnv(gym.Env):
 
     def _spawn_food(self):
         free = torch.nonzero(self._grid == 0, as_tuple=False)
+        if self.head is not None:
+            # Enforce minimum Manhattan distance of 4 from head
+            hr, hc = self.head
+            dists = torch.abs(free[:, 0] - hr) + torch.abs(free[:, 1] - hc)
+            far_mask = dists >= 4
+            if far_mask.any():
+                free = free[far_mask]
         idx = torch.randint(0, free.shape[0], (1,), device=self.device).item()
         r, c = free[idx].tolist()
         self.food = (r, c)
