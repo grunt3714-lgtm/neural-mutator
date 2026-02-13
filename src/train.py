@@ -44,6 +44,13 @@ def main():
                         help='Parallel workers for genome evaluation (default: 1)')
     parser.add_argument('--optimized', action='store_true',
                         help='Use optimized evolution (adaptive mutation, stagnation detection)')
+    parser.add_argument('--fleet', type=str, default=None,
+                        help='ZeroMQ fleet master bind address (e.g. tcp://*:5555). '
+                             'Workers must connect to this address.')
+    parser.add_argument('--fleet-workers', type=int, default=1,
+                        help='Minimum fleet workers to wait for before starting')
+    parser.add_argument('--fleet-batch', type=int, default=8,
+                        help='Genomes per fleet job batch')
     args = parser.parse_args()
 
     os.makedirs(args.output, exist_ok=True)
@@ -54,6 +61,16 @@ def main():
         title += " + Learned Speciation"
     print(title)
     print(f"{'='*60}")
+
+    fleet = None
+    if args.fleet:
+        from fleet_zmq.evaluator import FleetZmqEvaluator
+        fleet = FleetZmqEvaluator(
+            bind=args.fleet,
+            min_workers=args.fleet_workers,
+            batch_size=args.fleet_batch,
+        )
+        print(f"Fleet evaluation: {args.fleet} (min workers: {args.fleet_workers}, batch: {args.fleet_batch})")
 
     start = time.time()
     if args.optimized:
@@ -86,6 +103,7 @@ def main():
             complexity_cost=args.complexity_cost,
             output_dir=args.output,
             n_workers=args.workers,
+            fleet=fleet,
         )
     elapsed = time.time() - start
 

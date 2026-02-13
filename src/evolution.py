@@ -24,13 +24,14 @@ _worker_pool_size = 0
 
 
 def evaluate_genome(genome: Genome, env_id: str, n_episodes: int = 5,
-                    max_steps: int = 1000) -> float:
+                    max_steps: int = 1000, seeds=None) -> float:
     """Evaluate a genome's policy on an environment. Returns mean reward."""
     ensure_snake_registered()
     env = gym.make(env_id)
     rewards = []
-    for _ in range(n_episodes):
-        obs, _ = env.reset()
+    for ep in range(n_episodes):
+        seed = seeds[ep] if seeds and ep < len(seeds) else None
+        obs, _ = env.reset(seed=seed) if seed is not None else env.reset()
         total_reward = 0.0
         for _ in range(max_steps):
             action = genome.policy.act(obs)
@@ -68,8 +69,12 @@ def _get_pool(n_workers: int) -> _Pool:
 
 def evaluate_population(population: List[Genome], env_id: str,
                         n_episodes: int = 5, max_steps: int = 1000,
-                        n_workers: int = 1) -> List[float]:
-    """Evaluate all genomes, optionally in parallel."""
+                        n_workers: int = 1, fleet=None) -> List[float]:
+    """Evaluate all genomes, optionally in parallel or via fleet."""
+    if fleet is not None:
+        genomes_bytes = [g.to_bytes() for g in population]
+        return fleet.evaluate_population(genomes_bytes, env_id, n_episodes, max_steps)
+
     if n_workers <= 1:
         return [evaluate_genome(g, env_id, n_episodes, max_steps) for g in population]
 
@@ -252,7 +257,8 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
                   flex: bool = False,
                   complexity_cost: float = 0.0,
                   output_dir: str = None,
-                  n_workers: int = 1) -> Dict:
+                  n_workers: int = 1,
+                  fleet=None) -> Dict:
     """
     Main evolution loop with true self-replication.
 
@@ -317,7 +323,7 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
     for gen in range(generations):
         # Evaluate fitness — pure environment reward
         raw_fitnesses = evaluate_population(population, env_id, n_eval_episodes,
-                                            n_workers=n_workers)
+                                            n_workers=n_workers, fleet=fleet)
         for g, raw in zip(population, raw_fitnesses):
             g.fitness = raw
         
