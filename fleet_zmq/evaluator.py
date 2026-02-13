@@ -30,7 +30,7 @@ class FleetZmqEvaluator:
         bind: str = "tcp://*:5555",
         min_workers: int = 1,
         batch_size: int = 8,
-        recv_timeout_ms: int = 30_000,
+        recv_timeout_ms: int = 120_000,
         startup_timeout_s: float = 60.0,
         verbose: bool = True,
     ):
@@ -141,9 +141,12 @@ class FleetZmqEvaluator:
         # Workers become idle when they send READY.
         idle = set(self._workers_last_seen.keys())
         in_flight: Dict[str, bytes] = {}  # job_id -> worker_id
+        in_flight_ts: Dict[str, float] = {}  # job_id -> dispatch time
+        STALE_TIMEOUT = 60.0  # seconds before reassigning a job
 
         def dispatch(worker_id: bytes, job: Job):
             in_flight[job.job_id] = worker_id
+            in_flight_ts[job.job_id] = time.time()
             self._send(
                 worker_id,
                 b"JOB",
@@ -168,8 +171,19 @@ class FleetZmqEvaluator:
 
             msg = self._recv()
             if msg is None:
-                # Timeout: if we have idle workers but no messages, continue
-                # If a worker died, user can restart workers; we don't aggressively reassign here.
+                # Check for stale in-flight jobs and reassign them
+                now = time.time()
+                stale_jids = [jid for jid, ts in in_flight_ts.items()
+                              if now - ts > STALE_TIMEOUT]
+                for jid in stale_jids:
+                    job = jobs.get(jid)
+                    if job is not None:
+                        old_wid = in_flight.pop(jid, None)
+                        in_flight_ts.pop(jid, None)
+                        pending.append(job)
+                        if self.verbose and old_wid:
+                            wname = old_wid.decode("utf-8", "ignore")
+                            print(f"  reassigning stale job from {wname} (gen batch offset {job.offset})")
                 continue
 
             ident, kind, payload = msg
@@ -191,6 +205,7 @@ class FleetZmqEvaluator:
                     results[job.offset + i] = float(f)
 
                 in_flight.pop(jid, None)
+                in_flight_ts.pop(jid, None)
                 idle.add(ident)
                 continue
 

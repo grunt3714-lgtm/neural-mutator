@@ -2,6 +2,8 @@ use pyo3::prelude::*;
 use rand::Rng;
 use std::sync::mpsc;
 
+const NUM_FOODS: usize = 5;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpuState {
@@ -11,8 +13,7 @@ struct GpuState {
     direction: i32,
     head_r: i32,
     head_c: i32,
-    food_r: i32,
-    food_c: i32,
+    num_foods: u32,
     done: u32,
     reward: f32,
     terminated: u32,
@@ -20,7 +21,9 @@ struct GpuState {
     length: u32,
     action: i32,
     rng_state: u32,
-    _pad: [u32; 1],
+    food_r: [i32; NUM_FOODS],
+    food_c: [i32; NUM_FOODS],
+    _pad: [u32; 2],  // pad to 96 bytes (aligned)
 }
 
 struct GpuRuntime {
@@ -75,6 +78,8 @@ impl GpuRuntime {
 
         let shader_src = format!(
             r#"
+const NUM_FOODS: u32 = {num_foods}u;
+
 struct State {{
   grid_size: u32,
   max_steps: u32,
@@ -82,8 +87,7 @@ struct State {{
   direction: i32,
   head_r: i32,
   head_c: i32,
-  food_r: i32,
-  food_c: i32,
+  num_foods: u32,
   done: u32,
   reward: f32,
   terminated: u32,
@@ -91,7 +95,10 @@ struct State {{
   length: u32,
   action: i32,
   rng_state: u32,
+  food_r: array<i32, {num_foods}>,
+  food_c: array<i32, {num_foods}>,
   pad0: u32,
+  pad1: u32,
 }};
 
 @group(0) @binding(0) var<storage, read_write> state: State;
@@ -119,6 +126,64 @@ fn is_occupied(rr: i32, cc: i32, len: u32) -> bool {{
   return false;
 }}
 
+fn is_food(rr: i32, cc: i32) -> bool {{
+  for (var i: u32 = 0u; i < NUM_FOODS; i = i + 1u) {{
+    if (state.food_r[i] == rr && state.food_c[i] == cc) {{
+      return true;
+    }}
+  }}
+  return false;
+}}
+
+fn spawn_one_food(slot: u32) {{
+  let g = state.grid_size;
+  let cells = g * g;
+  let min_dist: i32 = 4;
+  var far_count: u32 = 0u;
+  var any_count: u32 = 0u;
+  for (var ci: u32 = 0u; ci < cells; ci = ci + 1u) {{
+    let rr = i32(ci / g);
+    let cc = i32(ci % g);
+    if (!is_occupied(rr, cc, state.length) && !is_food(rr, cc)) {{
+      any_count = any_count + 1u;
+      let d = abs(rr - state.head_r) + abs(cc - state.head_c);
+      if (d >= min_dist) {{
+        far_count = far_count + 1u;
+      }}
+    }}
+  }}
+  var use_far = far_count > 0u;
+  var target_count = far_count;
+  if (!use_far) {{
+    target_count = any_count;
+  }}
+  if (target_count > 0u) {{
+    let pick = pcg_next() % target_count;
+    var idx: u32 = 0u;
+    for (var ci: u32 = 0u; ci < cells; ci = ci + 1u) {{
+      let rr = i32(ci / g);
+      let cc = i32(ci % g);
+      if (!is_occupied(rr, cc, state.length) && !is_food(rr, cc)) {{
+        var valid = true;
+        if (use_far) {{
+          let d = abs(rr - state.head_r) + abs(cc - state.head_c);
+          if (d < min_dist) {{
+            valid = false;
+          }}
+        }}
+        if (valid) {{
+          if (idx == pick) {{
+            state.food_r[slot] = rr;
+            state.food_c[slot] = cc;
+            return;
+          }}
+          idx = idx + 1u;
+        }}
+      }}
+    }}
+  }}
+}}
+
 fn render() {{
   let g = state.grid_size;
   let cells = g * g;
@@ -126,9 +191,14 @@ fn render() {{
     pixels[i] = 0u;
   }}
 
-  if (state.food_r >= 0 && state.food_c >= 0) {{
-    let fi = u32(state.food_r) * g + u32(state.food_c);
-    pixels[fi] = rgb(255u, 0u, 0u);
+  // Render all foods
+  for (var f: u32 = 0u; f < NUM_FOODS; f = f + 1u) {{
+    let fr = state.food_r[f];
+    let fc = state.food_c[f];
+    if (fr >= 0 && fc >= 0) {{
+      let fi = u32(fr) * g + u32(fc);
+      pixels[fi] = rgb(255u, 0u, 0u);
+    }}
   }}
 
   for (var i: u32 = 1u; i < state.length; i = i + 1u) {{
@@ -202,7 +272,15 @@ fn main() {{
     return;
   }}
 
-  let ate = (nr == state.food_r && nc == state.food_c);
+  // Check which food (if any) was eaten
+  var ate_food: i32 = -1;
+  for (var f: u32 = 0u; f < NUM_FOODS; f = f + 1u) {{
+    if (nr == state.food_r[f] && nc == state.food_c[f]) {{
+      ate_food = i32(f);
+      break;
+    }}
+  }}
+  let ate = ate_food >= 0;
   let tail = body[state.length - 1u];
 
   var hits_body = false;
@@ -241,53 +319,8 @@ fn main() {{
 
   if (ate) {{
     state.reward = 1.0;
-    let cells = state.grid_size * state.grid_size;
-    let min_dist: i32 = 4;
-    // Count far free cells and any free cells
-    var far_count: u32 = 0u;
-    var any_count: u32 = 0u;
-    for (var ci: u32 = 0u; ci < cells; ci = ci + 1u) {{
-      let rr = i32(ci / state.grid_size);
-      let cc = i32(ci % state.grid_size);
-      if (!is_occupied(rr, cc, state.length)) {{
-        any_count = any_count + 1u;
-        let d = abs(rr - state.head_r) + abs(cc - state.head_c);
-        if (d >= min_dist) {{
-          far_count = far_count + 1u;
-        }}
-      }}
-    }}
-    // Pick random index among candidates
-    var use_far = far_count > 0u;
-    var target_count = far_count;
-    if (!use_far) {{
-      target_count = any_count;
-    }}
-    if (target_count > 0u) {{
-      let pick = pcg_next() % target_count;
-      var idx: u32 = 0u;
-      for (var ci: u32 = 0u; ci < cells; ci = ci + 1u) {{
-        let rr = i32(ci / state.grid_size);
-        let cc = i32(ci % state.grid_size);
-        if (!is_occupied(rr, cc, state.length)) {{
-          var valid = true;
-          if (use_far) {{
-            let d = abs(rr - state.head_r) + abs(cc - state.head_c);
-            if (d < min_dist) {{
-              valid = false;
-            }}
-          }}
-          if (valid) {{
-            if (idx == pick) {{
-              state.food_r = rr;
-              state.food_c = cc;
-              break;
-            }}
-            idx = idx + 1u;
-          }}
-        }}
-      }}
-    }}
+    // Respawn the eaten food slot
+    spawn_one_food(u32(ate_food));
   }}
 
   if (state.step_count >= state.max_steps) {{
@@ -298,6 +331,7 @@ fn main() {{
   render();
 }}
             "#,
+            num_foods = NUM_FOODS,
             max_cells = max_cells,
             pixel_count = pixel_count,
         );
@@ -343,7 +377,6 @@ fn main() {{
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-
 
         let body_readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("body_readback"),
@@ -517,12 +550,13 @@ fn main() {{
 pub struct SnakeGpuCore {
     grid_size: usize,
     max_steps: usize,
+    num_foods: usize,
     step_count: usize,
     direction: i32,
     head_r: i32,
     head_c: i32,
     body: Vec<(i32, i32)>,
-    food: (i32, i32),
+    foods: Vec<(i32, i32)>,
     done: bool,
     rng_state: u32,
     backend: String,
@@ -532,14 +566,16 @@ pub struct SnakeGpuCore {
 }
 
 impl SnakeGpuCore {
-    fn spawn_food(&mut self) {
+    fn spawn_one_food(&mut self) {
         let g = self.grid_size as i32;
         let min_dist: i32 = 4;
         let mut far_cells = Vec::new();
         let mut any_free = Vec::new();
         for r in 0..g {
             for c in 0..g {
-                if !self.body.iter().any(|&(br, bc)| br == r && bc == c) {
+                let occupied = self.body.iter().any(|&(br, bc)| br == r && bc == c)
+                    || self.foods.iter().any(|&(fr, fc)| fr == r && fc == c);
+                if !occupied {
                     any_free.push((r, c));
                     let dist = (r - self.head_r).abs() + (c - self.head_c).abs();
                     if dist >= min_dist {
@@ -551,11 +587,25 @@ impl SnakeGpuCore {
         let candidates = if far_cells.is_empty() { &any_free } else { &far_cells };
         if !candidates.is_empty() {
             let idx = rand::rng().random_range(0..candidates.len());
-            self.food = candidates[idx];
+            self.foods.push(candidates[idx]);
+        }
+    }
+
+    fn spawn_foods(&mut self) {
+        while self.foods.len() < self.num_foods {
+            self.spawn_one_food();
         }
     }
 
     fn gpu_state(&self, action: i32) -> GpuState {
+        let mut food_r = [-1i32; NUM_FOODS];
+        let mut food_c = [-1i32; NUM_FOODS];
+        for (i, &(fr, fc)) in self.foods.iter().enumerate() {
+            if i < NUM_FOODS {
+                food_r[i] = fr;
+                food_c[i] = fc;
+            }
+        }
         GpuState {
             grid_size: self.grid_size as u32,
             max_steps: self.max_steps as u32,
@@ -563,8 +613,7 @@ impl SnakeGpuCore {
             direction: self.direction,
             head_r: self.head_r,
             head_c: self.head_c,
-            food_r: self.food.0,
-            food_c: self.food.1,
+            num_foods: self.num_foods as u32,
             done: if self.done { 1 } else { 0 },
             reward: 0.0,
             terminated: 0,
@@ -572,7 +621,9 @@ impl SnakeGpuCore {
             length: self.body.len() as u32,
             action,
             rng_state: self.rng_state,
-            _pad: [0],
+            food_r,
+            food_c,
+            _pad: [0; 2],
         }
     }
 
@@ -590,7 +641,12 @@ impl SnakeGpuCore {
         self.direction = state.direction;
         self.head_r = state.head_r;
         self.head_c = state.head_c;
-        self.food = (state.food_r, state.food_c);
+        self.foods.clear();
+        for i in 0..NUM_FOODS {
+            if state.food_r[i] >= 0 && state.food_c[i] >= 0 {
+                self.foods.push((state.food_r[i], state.food_c[i]));
+            }
+        }
         self.done = state.done != 0;
         self.rng_state = state.rng_state;
     }
@@ -637,10 +693,10 @@ impl SnakeGpuCore {
             return (self.render_flat(), reward, terminated, truncated, self.body.len());
         }
 
-        let ate = (nr, nc) == self.food;
+        let ate = self.foods.iter().position(|&(fr, fc)| fr == nr && fc == nc);
         let tail = *self.body.last().unwrap();
         let hits_body = self.body.iter().any(|&(r, c)| r == nr && c == nc);
-        if hits_body && !((nr, nc) == tail && !ate) {
+        if hits_body && !((nr, nc) == tail && ate.is_none()) {
             self.done = true;
             reward = -1.0;
             terminated = true;
@@ -651,9 +707,10 @@ impl SnakeGpuCore {
         self.head_c = nc;
         self.body.insert(0, (nr, nc));
 
-        if ate {
+        if let Some(food_idx) = ate {
             reward = 1.0;
-            self.spawn_food();
+            self.foods.remove(food_idx);
+            self.spawn_one_food();
         } else {
             self.body.pop();
         }
@@ -682,11 +739,13 @@ impl SnakeGpuCore {
             }
         }
 
-        let (fr, fc) = self.food;
-        if fr >= 0 && fc >= 0 {
-            let (ru, cu) = (fr as usize, fc as usize);
-            if ru < g && cu < g {
-                out[idx(ru, cu, 0, g)] = 255;
+        // Render all foods
+        for &(fr, fc) in &self.foods {
+            if fr >= 0 && fc >= 0 {
+                let (ru, cu) = (fr as usize, fc as usize);
+                if ru < g && cu < g {
+                    out[idx(ru, cu, 0, g)] = 255;
+                }
             }
         }
 
@@ -706,17 +765,19 @@ impl SnakeGpuCore {
 #[pymethods]
 impl SnakeGpuCore {
     #[new]
-    pub fn new(grid_size: usize, max_steps: usize) -> PyResult<Self> {
+    #[pyo3(signature = (grid_size, max_steps, num_foods=5))]
+    pub fn new(grid_size: usize, max_steps: usize, num_foods: usize) -> PyResult<Self> {
         let c = (grid_size / 2) as i32;
         let mut core = Self {
             grid_size,
             max_steps,
+            num_foods,
             step_count: 0,
             direction: 1,
             head_r: c,
             head_c: c,
             body: vec![(c, c), (c, c - 1), (c, c - 2)],
-            food: (0, 0),
+            foods: Vec::new(),
             done: false,
             rng_state: 12345,
             backend: "None".to_string(),
@@ -724,7 +785,7 @@ impl SnakeGpuCore {
             execution_mode: "cpu".to_string(),
             gpu: None,
         };
-        core.spawn_food();
+        core.spawn_foods();
 
         if let Ok((gpu, backend, adapter_name)) = GpuRuntime::new(grid_size) {
             core.backend = backend;
@@ -752,8 +813,9 @@ impl SnakeGpuCore {
         self.head_c = c;
         self.body = vec![(c, c), (c, c - 1), (c, c - 2)];
         self.done = false;
-        self.rng_state = rand::rng().random::<u32>() | 1; // ensure nonzero
-        self.spawn_food();
+        self.rng_state = rand::rng().random::<u32>() | 1;
+        self.foods.clear();
+        self.spawn_foods();
 
         if let Some(gpu) = &self.gpu {
             let state = self.gpu_state(-1);

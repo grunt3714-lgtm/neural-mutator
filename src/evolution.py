@@ -88,7 +88,8 @@ def create_population(pop_size: int, obs_dim: int, act_dim: int,
                       mutator_type: str = 'chunk', hidden: int = 64,
                       chunk_size: int = 64,
                       speciation: bool = False,
-                      flex: bool = False) -> List[Genome]:
+                      flex: bool = False,
+                      output_dir: str = None) -> List[Genome]:
     """Create initial population. If speciation=True, each genome gets a CompatibilityNet."""
     population = []
     for _ in range(pop_size):
@@ -122,10 +123,34 @@ def create_population(pop_size: int, obs_dim: int, act_dim: int,
     
     # Pre-train compat nets on the initial population's genome distances
     if speciation and len(population) > 1:
-        print("Pre-training compatibility networks...")
         genomes_flat = [g.get_flat_weights().detach() for g in population]
-        for g in population:
-            g.compat_net.pretrain(genomes_flat, steps=300)
+        genome_dim = population[0].compat_net.genome_dim
+        
+        # Check for cached pre-trained weights
+        cache_dir = os.path.join(output_dir, '.cache') if output_dir else None
+        cache_path = os.path.join(cache_dir, f'compat_pretrained_{genome_dim}.pt') if cache_dir else None
+        
+        if cache_path and os.path.exists(cache_path):
+            print(f"Loading cached pre-trained compat net from {cache_path}")
+            cached = torch.load(cache_path, weights_only=True)
+            for g in population:
+                g.compat_net.encoder.load_state_dict(cached['encoder'])
+                g.compat_net.scorer.load_state_dict(cached['scorer'])
+        else:
+            print("Pre-training compatibility network (one template, cloned to all)...")
+            # Pre-train just ONE compat net, then clone weights to all others
+            template = population[0].compat_net
+            template.pretrain(genomes_flat, steps=300)
+            encoder_state = template.encoder.state_dict()
+            scorer_state = template.scorer.state_dict()
+            for g in population[1:]:
+                g.compat_net.encoder.load_state_dict(encoder_state)
+                g.compat_net.scorer.load_state_dict(scorer_state)
+            # Cache for future runs
+            if cache_dir:
+                os.makedirs(cache_dir, exist_ok=True)
+                torch.save({'encoder': encoder_state, 'scorer': scorer_state}, cache_path)
+                print(f"  Cached pre-trained weights to {cache_path}")
         
         # Verify: check initial species structure
         test_info = assign_species(population)
@@ -282,7 +307,7 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
 
     population = create_population(pop_size, obs_dim, act_dim, mutator_type,
                                    hidden, chunk_size, speciation=speciation,
-                                   flex=flex)
+                                   flex=flex, output_dir=output_dir)
     genome = population[0]
     print(f"Genome: {genome.num_policy_params()} policy params + "
           f"{genome.num_mutator_params()} mutator params + "
@@ -349,11 +374,14 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
         mean_fit = np.mean(fitnesses)
         worst_fit = min(fitnesses)
 
-        # Save best genome periodically
+        # Save best genome (current gen + best-ever)
         if output_dir is not None:
-            import os
             best_genome_path = os.path.join(output_dir, 'best_genome.pt')
             population[best_idx].save(best_genome_path)
+            if not hasattr(run_evolution, '_best_ever_fit') or best_fit > run_evolution._best_ever_fit:
+                run_evolution._best_ever_fit = best_fit
+                best_ever_path = os.path.join(output_dir, 'best_ever_genome.pt')
+                population[best_idx].save(best_ever_path)
 
         # Compute mutator drift from generation 0
         drifts = []

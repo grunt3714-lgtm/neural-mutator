@@ -45,7 +45,8 @@ class SnakePixelsEnv(gym.Env):
         self.head = None
         self.body: list[tuple[int, int]] = []
         self.direction = 1
-        self.food = None
+        self.foods: list[tuple[int, int]] = []
+        self.num_foods = 5
 
         self._rust_core = None
         self.gpu_backend = "python"
@@ -54,7 +55,7 @@ class SnakePixelsEnv(gym.Env):
         self.compute_mode = "cpu"
         if SnakeGpuCore is not None:
             try:
-                self._rust_core = SnakeGpuCore(self.grid_size, self.max_steps)
+                self._rust_core = SnakeGpuCore(self.grid_size, self.max_steps, self.num_foods)
                 b, a = self._rust_core.gpu_info()
                 self.gpu_backend = b
                 self.gpu_adapter = a
@@ -63,19 +64,22 @@ class SnakePixelsEnv(gym.Env):
             except Exception:
                 self._rust_core = None
 
-    def _spawn_food(self):
-        free = torch.nonzero(self._grid == 0, as_tuple=False)
-        if self.head is not None:
-            # Enforce minimum Manhattan distance of 4 from head
-            hr, hc = self.head
-            dists = torch.abs(free[:, 0] - hr) + torch.abs(free[:, 1] - hc)
-            far_mask = dists >= 4
-            if far_mask.any():
-                free = free[far_mask]
-        idx = torch.randint(0, free.shape[0], (1,), device=self.device).item()
-        r, c = free[idx].tolist()
-        self.food = (r, c)
-        self._grid[r, c] = 2
+    def _spawn_food(self, count: int = 1):
+        """Spawn `count` food items on empty cells (min Manhattan distance 4 from head)."""
+        for _ in range(count):
+            free = torch.nonzero(self._grid == 0, as_tuple=False)
+            if free.shape[0] == 0:
+                break
+            if self.head is not None:
+                hr, hc = self.head
+                dists = torch.abs(free[:, 0] - hr) + torch.abs(free[:, 1] - hc)
+                far_mask = dists >= 4
+                if far_mask.any():
+                    free = free[far_mask]
+            idx = torch.randint(0, free.shape[0], (1,), device=self.device).item()
+            r, c = free[idx].tolist()
+            self.foods.append((r, c))
+            self._grid[r, c] = 2
 
     def _obs_pixels(self) -> np.ndarray:
         # palette: empty black, snake green, food red, head white
@@ -107,7 +111,8 @@ class SnakePixelsEnv(gym.Env):
             self._grid[r, col] = 1
         self._grid[self.head[0], self.head[1]] = 3
 
-        self._spawn_food()
+        self.foods = []
+        self._spawn_food(count=self.num_foods)
         obs = self._obs_pixels()
         self._last_obs = obs
         return obs, {"backend": "python", "gpu_backend": self.gpu_backend, "gpu_adapter": self.gpu_adapter}
@@ -145,7 +150,7 @@ class SnakePixelsEnv(gym.Env):
             done = True
             return self._obs_pixels(), reward, done, False, {}
 
-        ate = (nr, nc) == self.food
+        ate = (nr, nc) in self.foods
 
         # self hit (allow stepping into tail only if not growing)
         tail = self.body[-1]
@@ -164,7 +169,8 @@ class SnakePixelsEnv(gym.Env):
 
         if ate:
             reward = 1.0
-            self._spawn_food()
+            self.foods.remove((nr, nc))
+            self._spawn_food(count=1)
         else:
             tr, tc = self.body.pop()
             # if tail wasn't overwritten by new head, clear it
