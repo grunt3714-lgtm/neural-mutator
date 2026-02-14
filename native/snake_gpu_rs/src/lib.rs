@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use rand::Rng;
 use std::sync::mpsc;
 
-const NUM_FOODS: usize = 5;
+const NUM_FOODS: usize = 10;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]

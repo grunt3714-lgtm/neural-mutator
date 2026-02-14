@@ -162,14 +162,15 @@ class FleetZmqEvaluator:
                 ),
             )
 
-        # Main loop
+        # Main loop — use short poll so we detect stale jobs quickly
+        POLL_MS = 5000  # check stale every 5s
         while pending or in_flight:
             while idle and pending:
                 wid = idle.pop()
                 job = pending.pop(0)
                 dispatch(wid, job)
 
-            msg = self._recv()
+            msg = self._recv(timeout_ms=POLL_MS)
             if msg is None:
                 # Check for stale in-flight jobs and reassign them
                 now = time.time()
@@ -183,7 +184,7 @@ class FleetZmqEvaluator:
                         pending.append(job)
                         if self.verbose and old_wid:
                             wname = old_wid.decode("utf-8", "ignore")
-                            print(f"  reassigning stale job from {wname} (gen batch offset {job.offset})")
+                            print(f"  reassigning stale job from {wname} (gen batch offset {job.offset})", flush=True)
                 continue
 
             ident, kind, payload = msg

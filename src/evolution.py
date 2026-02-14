@@ -283,7 +283,8 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
                   complexity_cost: float = 0.0,
                   output_dir: str = None,
                   n_workers: int = 1,
-                  fleet=None) -> Dict:
+                  fleet=None,
+                  progress_callback=None) -> Dict:
     """
     Main evolution loop with true self-replication.
 
@@ -422,6 +423,10 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
                 msg += (f" | Layers: {np.mean(layers_list):.1f} "
                         f"| Neurons: {np.mean(neurons_list):.0f}")
             print(msg)
+
+        if progress_callback is not None:
+            best_ever = max(history['best']) if history['best'] else best_fit
+            progress_callback(gen, generations, best_fit, mean_fit, best_ever)
 
         population, species_info = evolve_generation(
             population, crossover_rate, elitism=5, generation=gen,

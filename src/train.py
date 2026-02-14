@@ -18,6 +18,83 @@ import numpy as np
 from .evolution import run_evolution
 
 
+class ProgressFileWriter:
+    """Writes progress to a JSON file each generation for fleet aggregation."""
+
+    def __init__(self, path: str = '/tmp/train_progress.json', node_name: str = None,
+                 seed: int = None):
+        self.path = path
+        self.node_name = node_name or 'unknown'
+        self.seed = seed
+
+    def __call__(self, gen: int, total: int, best: float, mean: float, best_ever: float):
+        import json
+        data = {
+            'gen': gen, 'total': total,
+            'best': best, 'mean': mean, 'best_ever': best_ever,
+            'node': self.node_name, 'seed': self.seed,
+            'done': (gen == total - 1),
+            'ts': time.time(),
+        }
+        tmp = self.path + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(data, f)
+        os.replace(tmp, self.path)
+
+
+class DiscordTqdmProgress:
+    """Built-in tqdm.contrib.discord progress for fleet runs."""
+
+    def __init__(self, total: int, token: str, channel_id: int):
+        from tqdm.contrib.discord import tqdm as tqdm_discord
+        self._bar = tqdm_discord(
+            total=total,
+            token=token,
+            channel_id=int(channel_id),
+            desc='🐍 Fleet Training',
+            unit='gen',
+            mininterval=0,
+            miniters=1,
+        )
+        self._last = 0
+
+    def __call__(self, gen: int, total: int, best: float, mean: float, best_ever: float):
+        done = gen + 1
+        delta = done - self._last
+        if delta > 0:
+            self._bar.set_postfix({
+                'best': f'{best:+.2f}',
+                'mean': f'{mean:+.2f}',
+                'best_ever': f'{best_ever:+.2f}',
+            }, refresh=False)
+            self._bar.update(delta)
+            self._last = done
+        if gen == total - 1:
+            self._bar.close()
+
+
+class CombinedProgress:
+    def __init__(self, callbacks):
+        self.callbacks = [cb for cb in callbacks if cb is not None]
+
+    def __call__(self, gen: int, total: int, best: float, mean: float, best_ever: float):
+        for cb in self.callbacks:
+            try:
+                cb(gen, total, best, mean, best_ever)
+            except Exception as e:
+                print(f'[progress] callback error: {e}')
+
+
+def _load_discord_token_from_openclaw() -> str | None:
+    try:
+        cfg_path = os.path.expanduser('~/.openclaw/openclaw.json')
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+        return cfg.get('channels', {}).get('discord', {}).get('token')
+    except Exception:
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description='Neural Mutator Evolution')
     parser.add_argument('--env', default='CartPole-v1', help='Gymnasium environment')
@@ -44,13 +121,18 @@ def main():
                         help='Parallel workers for genome evaluation (default: 1)')
     parser.add_argument('--optimized', action='store_true',
                         help='Use optimized evolution (adaptive mutation, stagnation detection)')
-    parser.add_argument('--fleet', type=str, default=None,
-                        help='ZeroMQ fleet master bind address (e.g. tcp://*:5555). '
-                             'Workers must connect to this address.')
+    parser.add_argument('--fleet', action='store_true',
+                        help='Enable distributed fleet evaluation via multiprocessing.managers')
+    parser.add_argument('--fleet-port', type=int, default=5555,
+                        help='Fleet manager port (default: 5555)')
     parser.add_argument('--fleet-workers', type=int, default=1,
                         help='Minimum fleet workers to wait for before starting')
-    parser.add_argument('--fleet-batch', type=int, default=8,
-                        help='Genomes per fleet job batch')
+    parser.add_argument('--fleet-authkey', default='neuralfleet',
+                        help='Fleet auth key')
+    parser.add_argument('--discord-channel-id', type=int, default=1471943945540866139,
+                        help='Discord channel for built-in tqdm progress (default: #training)')
+    parser.add_argument('--no-discord-tqdm', action='store_true',
+                        help='Disable built-in tqdm.contrib.discord progress updates')
     args = parser.parse_args()
 
     os.makedirs(args.output, exist_ok=True)
@@ -64,13 +146,27 @@ def main():
 
     fleet = None
     if args.fleet:
-        from fleet_zmq.evaluator import FleetZmqEvaluator
-        fleet = FleetZmqEvaluator(
-            bind=args.fleet,
+        from fleet.manager import FleetEvaluator
+        fleet = FleetEvaluator(
+            port=args.fleet_port,
+            authkey=args.fleet_authkey.encode(),
             min_workers=args.fleet_workers,
-            batch_size=args.fleet_batch,
         )
-        print(f"Fleet evaluation: {args.fleet} (min workers: {args.fleet_workers}, batch: {args.fleet_batch})")
+        print(f"Fleet evaluation: port {args.fleet_port} (min workers: {args.fleet_workers})")
+
+    # Built-in progress callbacks (always file; fleet also Discord tqdm)
+    progress_callbacks = [ProgressFileWriter(node_name=os.uname().nodename, seed=args.seed)]
+    if args.fleet and not args.no_discord_tqdm:
+        token = os.getenv('TQDM_DISCORD_TOKEN') or _load_discord_token_from_openclaw()
+        if token and args.discord_channel_id:
+            progress_callbacks.append(
+                DiscordTqdmProgress(args.generations, token, args.discord_channel_id)
+            )
+            print(f"Discord tqdm: enabled (channel {args.discord_channel_id})")
+        else:
+            print("Discord tqdm: disabled (missing token/channel)")
+
+    progress_callback = CombinedProgress(progress_callbacks)
 
     start = time.time()
     if args.optimized:
@@ -104,6 +200,7 @@ def main():
             output_dir=args.output,
             n_workers=args.workers,
             fleet=fleet,
+            progress_callback=progress_callback,
         )
     elapsed = time.time() - start
 
@@ -153,16 +250,21 @@ def main():
 
     # Fitness
     ax = axes[0]
-    ax.plot(gens, history['best'], label='Best', color='green')
-    ax.plot(gens, history['mean'], label='Mean', color='blue')
-    ax.fill_between(gens, history['worst'], history['best'], alpha=0.15, color='blue')
+    ax.plot(gens, history['best'], label='Best', color='green', linewidth=2)
+    ax.plot(gens, history['mean'], label='Mean', color='blue', linewidth=1.5)
+    ax.fill_between(gens, history['worst'], history['best'], alpha=0.12, color='blue')
     ax.set_xlabel('Generation')
     ax.set_ylabel('Fitness')
-    subtitle = f'{args.mutator} on {args.env} (self-replication'
+    subtitle = f'{args.env} | pop {args.pop_size} | {args.mutator}'
+    extras = []
     if args.speciation:
-        subtitle += ' + learned speciation)'
-    else:
-        subtitle += ')'
+        extras.append('speciation')
+    if args.flex:
+        extras.append('flex')
+    if args.complexity_cost > 0:
+        extras.append(f'cc={args.complexity_cost}')
+    if extras:
+        subtitle += f' ({", ".join(extras)})'
     ax.set_title(subtitle)
     ax.legend()
     ax.grid(True, alpha=0.3)
@@ -187,7 +289,7 @@ def main():
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    # Parameter count plot (when complexity cost is active)
+    # Parameter count
     plot_idx = 3
     if has_complexity:
         ax = axes[plot_idx]
@@ -200,7 +302,7 @@ def main():
         ax.grid(True, alpha=0.3)
         plot_idx += 1
 
-    # Speciation plot
+    # Speciation
     if args.speciation:
         ax = axes[plot_idx]
         ax2 = ax.twinx()

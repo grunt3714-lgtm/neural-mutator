@@ -46,7 +46,7 @@ class SnakePixelsEnv(gym.Env):
         self.body: list[tuple[int, int]] = []
         self.direction = 1
         self.foods: list[tuple[int, int]] = []
-        self.num_foods = 5
+        self.num_foods = 10
 
         self._rust_core = None
         self.gpu_backend = "python"
