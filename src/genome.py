@@ -55,6 +55,42 @@ class Policy(nn.Module):
         return action.numpy()
 
 
+class PolicyCNN(nn.Module):
+    """Small CNN policy for Snake semantic grids (empty/snake/food flattened HWC)."""
+
+    def __init__(self, obs_dim: int, act_dim: int, grid_size: int = 16, channels: int = 3):
+        super().__init__()
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+        self.grid_size = grid_size
+        self.channels = channels
+        self.conv = nn.Sequential(
+            nn.Conv2d(channels, 8, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(8, 8, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+        )
+        self.fc = nn.Sequential(
+            nn.Linear(8 * grid_size * grid_size, 32),
+            nn.ReLU(),
+            nn.Linear(32, act_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x expected flattened HWC [B, H*W*C]
+        b = x.shape[0]
+        x = x.view(b, self.grid_size, self.grid_size, self.channels).permute(0, 3, 1, 2)
+        y = self.conv(x)
+        y = y.reshape(b, -1)
+        return self.fc(y)
+
+    def act(self, obs: np.ndarray) -> np.ndarray:
+        with torch.no_grad():
+            x = torch.FloatTensor(obs).unsqueeze(0)
+            action = self.forward(x).squeeze(0)
+        return action.numpy()
+
+
 # Alias for backward compatibility
 FixedPolicy = Policy
 
@@ -521,6 +557,139 @@ class ErrorCorrectorMutator(nn.Module):
         return mutated.view(-1)[:n]
 
 
+class DualHeadCorrectorMutator(nn.Module):
+    """Two-head corrector mutator: separate correction/exploration for policy vs meta (mutator+compat).
+
+    Goal: keep replication (meta) stable while still allowing larger/more exploratory policy updates.
+
+    Uses a shared encoder+corrector trunk, but two references + two scale/noise parameter sets.
+
+    Expected weight_coords: 1D tensor where weight_coords[0] = n_policy (split index).
+    """
+
+    def __init__(self, chunk_size: int = 64, ref_dim: int = 16, hidden: int = 64):
+        super().__init__()
+        self.chunk_size = chunk_size
+        self.ref_dim = ref_dim
+
+        self.reference_policy = nn.Parameter(torch.randn(ref_dim) * 0.1)
+        self.reference_meta = nn.Parameter(torch.randn(ref_dim) * 0.1)
+
+        self.encoder = nn.Sequential(
+            nn.Linear(chunk_size, ref_dim),
+            nn.Tanh(),
+        )
+        self.corrector = nn.Sequential(
+            nn.Linear(ref_dim * 3, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, chunk_size),
+            nn.Tanh(),
+        )
+
+        # Policy head explores more; meta head stays conservative.
+        self.correction_scale_policy = nn.Parameter(torch.tensor(0.03))
+        self.correction_scale_meta = nn.Parameter(torch.tensor(0.01))
+        self.explore_scale_policy = nn.Parameter(torch.tensor(0.01))
+        self.explore_scale_meta = nn.Parameter(torch.tensor(0.002))
+
+    def _split_index(self, flat_weights: torch.Tensor, weight_coords: torch.Tensor | None) -> int:
+        if weight_coords is None or weight_coords.numel() < 1:
+            return int(flat_weights.shape[0] // 2)
+        return int(weight_coords.view(-1)[0].item())
+
+    def mutate_genome(self, flat_weights: torch.Tensor,
+                      weight_coords: torch.Tensor = None,
+                      other_weights: torch.Tensor = None) -> torch.Tensor:
+        n = flat_weights.shape[0]
+        cs = self.chunk_size
+        pad_len = (cs - n % cs) % cs
+        padded = torch.cat([flat_weights, torch.zeros(pad_len)])
+
+        split = self._split_index(flat_weights, weight_coords)
+        n_chunks = padded.shape[0] // cs
+        starts = torch.arange(n_chunks) * cs
+        is_policy_chunk = starts < split
+
+        def correction_for(chunks: torch.Tensor, ref_vec: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+            encoded = self.encoder(chunks)
+            ref = ref_vec.unsqueeze(0).expand(encoded.shape[0], -1)
+            diff = encoded - ref
+            x = torch.cat([encoded, ref, diff], dim=1)
+            corr = self.corrector(x) * scale
+            return torch.clamp(corr, -0.1, 0.1)
+
+        if other_weights is not None:
+            other_pad = torch.cat([
+                other_weights,
+                torch.zeros(max(0, padded.shape[0] - other_weights.shape[0])),
+            ])
+            other_pad = other_pad[:padded.shape[0]]
+            chunks_a = padded.view(-1, cs)
+            chunks_b = other_pad.view(-1, cs)
+            base = (chunks_a + chunks_b) / 2
+        else:
+            base = padded.view(-1, cs)
+
+        corr = torch.zeros_like(base)
+        if is_policy_chunk.any():
+            corr[is_policy_chunk] = correction_for(
+                base[is_policy_chunk], self.reference_policy, self.correction_scale_policy
+            )
+        if (~is_policy_chunk).any():
+            corr[~is_policy_chunk] = correction_for(
+                base[~is_policy_chunk], self.reference_meta, self.correction_scale_meta
+            )
+
+        noise = torch.zeros_like(base)
+        if is_policy_chunk.any():
+            noise[is_policy_chunk] = torch.randn_like(base[is_policy_chunk]) * self.explore_scale_policy
+        if (~is_policy_chunk).any():
+            noise[~is_policy_chunk] = torch.randn_like(base[~is_policy_chunk]) * self.explore_scale_meta
+
+        mutated = base + corr + noise
+        return mutated.view(-1)[:n]
+
+
+class DualMixtureCorrectorMutator(DualHeadCorrectorMutator):
+    """Dual-head corrector with an explicit Gaussian escape hatch on the *policy* slice.
+
+    The meta slice (mutator+compat) remains conservative (corrector+small noise).
+
+    Policy slice behavior:
+    - Always applies corrector+noise
+    - Additionally, with probability p_gauss_policy, adds Gaussian noise with scale gauss_scale_policy
+
+    This keeps it a NN mutator, but prevents getting trapped in a fixed-point attractor.
+    """
+
+    def __init__(
+        self,
+        chunk_size: int = 64,
+        ref_dim: int = 16,
+        hidden: int = 64,
+        p_gauss_policy: float = 0.20,
+        gauss_scale_policy: float = 0.03,
+    ):
+        super().__init__(chunk_size=chunk_size, ref_dim=ref_dim, hidden=hidden)
+        # Store as buffers/tensors so they serialize nicely.
+        self.p_gauss_policy = nn.Parameter(torch.tensor(float(p_gauss_policy)), requires_grad=False)
+        self.gauss_scale_policy = nn.Parameter(torch.tensor(float(gauss_scale_policy)), requires_grad=False)
+
+    def mutate_genome(self, flat_weights: torch.Tensor,
+                      weight_coords: torch.Tensor = None,
+                      other_weights: torch.Tensor = None) -> torch.Tensor:
+        # Start with the base dual-head corrector mutation
+        mutated = super().mutate_genome(flat_weights, weight_coords=weight_coords, other_weights=other_weights)
+
+        # Add Gaussian escape noise only on policy slice (and only sometimes)
+        split = self._split_index(flat_weights, weight_coords)
+        if split > 0 and float(self.p_gauss_policy.item()) > 0:
+            if torch.rand(()) < self.p_gauss_policy:
+                noise = torch.randn_like(mutated[:split]) * self.gauss_scale_policy
+                mutated[:split] = mutated[:split] + noise
+        return mutated
+
+
 class TransformerMutator(nn.Module):
     """Transformer-based mutator with learned crossover via cross-attention."""
 
@@ -572,6 +741,46 @@ class TransformerMutator(nn.Module):
 
         mutated = (chunks + delta).view(-1)[:n]
         return mutated
+
+
+MUTATOR_REGISTRY = {
+    'gaussian': GaussianMutator,
+    'chunk': ChunkMutator,
+    'transformer': TransformerMutator,
+    'corrector': ErrorCorrectorMutator,
+    'dualcorrector': DualHeadCorrectorMutator,
+    'dualmixture': DualMixtureCorrectorMutator,
+}
+
+MUTATOR_CLASS_TO_KEY = {cls.__name__: key for key, cls in MUTATOR_REGISTRY.items()}
+
+
+def available_mutator_types() -> list[str]:
+    return list(MUTATOR_REGISTRY.keys())
+
+
+def create_mutator(mutator_type: str, **kwargs) -> nn.Module:
+    try:
+        mut_cls = MUTATOR_REGISTRY[mutator_type]
+    except KeyError as e:
+        raise ValueError(f"Unknown mutator type: {mutator_type}") from e
+
+    if mutator_type == 'gaussian':
+        return mut_cls()
+
+    if mutator_type == 'dualmixture':
+        ctor = {}
+        if 'chunk_size' in kwargs:
+            ctor['chunk_size'] = kwargs['chunk_size']
+        if 'p_gauss_policy' in kwargs:
+            ctor['p_gauss_policy'] = kwargs['p_gauss_policy']
+        if 'gauss_scale_policy' in kwargs:
+            ctor['gauss_scale_policy'] = kwargs['gauss_scale_policy']
+        return mut_cls(**ctor)
+
+    if 'chunk_size' in kwargs:
+        return mut_cls(chunk_size=kwargs['chunk_size'])
+    return mut_cls()
 
 
 class CompatibilityNet(nn.Module):
@@ -835,12 +1044,17 @@ class Genome:
 
         decay = max(0.2, 1.0 - 0.8 * (generation / max(max_generations, 1)))
 
+        # Extract policy size (split index for dual-head mutators)
+        parent_n_policy = self.num_policy_params()
+
         # Feed parent's full genome through parent's mutator
-        mutated_full = self.mutator.mutate_genome(parent_full)
+        mutated_full = self.mutator.mutate_genome(
+            parent_full,
+            weight_coords=torch.tensor([parent_n_policy]),
+        )
         full_delta = mutated_full - parent_full
 
         # Extract policy delta — may need to resize if architecture changed
-        parent_n_policy = self.num_policy_params()
         policy_delta_raw = full_delta[:parent_n_policy]
 
         if n_policy == parent_n_policy:
@@ -913,7 +1127,7 @@ class Genome:
         decay = max(0.2, 1.0 - 0.8 * (generation / max(max_generations, 1)))
         
         # Let the fitter parent's mutator see both genomes and decide
-        mutated_full = self.mutator.mutate_genome(my_flat, other_weights=other_flat)
+        mutated_full = self.mutator.mutate_genome(my_flat, weight_coords=torch.tensor([n_policy]), other_weights=other_flat)
         
         # Extract child weights from mutator output
         n_mutator = self.num_mutator_params()
@@ -979,6 +1193,10 @@ class Genome:
         if isinstance(self.policy, FlexiblePolicy):
             return FlexiblePolicy(self.policy.obs_dim, self.policy.act_dim,
                                   list(self.policy.layer_sizes))
+        if isinstance(self.policy, PolicyCNN):
+            return PolicyCNN(self.policy.obs_dim, self.policy.act_dim,
+                             grid_size=self.policy.grid_size,
+                             channels=self.policy.channels)
         first_layer = self.policy.net[0]
         last_layer = self.policy.net[-1]
         hidden = first_layer.out_features
@@ -999,12 +1217,20 @@ class Genome:
             'mutator_state': self.mutator.state_dict(),
             'obs_dim': self.policy.obs_dim if hasattr(self.policy, 'obs_dim') else self.policy.net[0].in_features,
             'act_dim': self.policy.act_dim if hasattr(self.policy, 'act_dim') else self.policy.net[-1].out_features,
-            'mutator_type': type(self.mutator).__name__,
+            'mutator_type': self.mutator_type,
+            'mutator_class': type(self.mutator).__name__,
             'fitness': self.fitness,
+            'policy_arch': 'mlp',
         }
         if isinstance(self.policy, FlexiblePolicy):
+            data['policy_arch'] = 'flex'
             data['flex'] = True
             data['layer_sizes'] = list(self.policy.layer_sizes)
+        elif isinstance(self.policy, PolicyCNN):
+            data['policy_arch'] = 'cnn'
+            data['flex'] = False
+            data['grid_size'] = self.policy.grid_size
+            data['channels'] = self.policy.channels
         else:
             data['flex'] = False
             data['hidden'] = self.policy.net[0].out_features
@@ -1015,26 +1241,24 @@ class Genome:
         """Load genome from disk or file-like object."""
         data = torch.load(path, weights_only=False)
         obs_dim, act_dim = data['obs_dim'], data['act_dim']
-        if data.get('flex'):
+        arch = data.get('policy_arch')
+        if arch == 'cnn':
+            policy = PolicyCNN(obs_dim, act_dim,
+                               grid_size=data.get('grid_size', 16),
+                               channels=data.get('channels', 3))
+        elif data.get('flex') or arch == 'flex':
             policy = FlexiblePolicy(obs_dim, act_dim, data['layer_sizes'])
         else:
             policy = Policy(obs_dim, act_dim, data.get('hidden', 64))
         policy.load_state_dict(data['policy_state'])
-        # Reconstruct mutator
-        mut_map = {
-            'GaussianMutator': GaussianMutator,
-            'ChunkMutator': ChunkMutator,
-            'TransformerMutator': TransformerMutator,
-            'ErrorCorrectorMutator': ErrorCorrectorMutator,
-        }
-        mut_cls = mut_map.get(data['mutator_type'], GaussianMutator)
-        if mut_cls == GaussianMutator:
-            mutator = mut_cls()
-        else:
-            n_params = sum(p.numel() for p in policy.parameters())
-            mutator = mut_cls(n_params)
+        # Reconstruct mutator from registry (supports legacy class-name saves)
+        saved_type = data.get('mutator_type', 'GaussianMutator')
+        mutator_key = MUTATOR_CLASS_TO_KEY.get(saved_type, saved_type.lower())
+        if mutator_key not in MUTATOR_REGISTRY:
+            mutator_key = 'gaussian'
+        mutator = create_mutator(mutator_key)
         mutator.load_state_dict(data['mutator_state'])
-        genome = Genome(policy, mutator)
+        genome = Genome(policy, mutator, mutator_type=mutator_key)
         genome.fitness = data.get('fitness', 0.0)
         return genome
 

@@ -25,7 +25,11 @@ FleetManager.register('get_register_queue')
 
 
 def _eval_one(args):
-    """Evaluate a single genome in a worker subprocess."""
+    """Evaluate a single genome in a worker subprocess.
+
+    Returns:
+        (mean_reward, env_steps)
+    """
     genome_bytes, env_id, n_episodes, max_steps = args
 
     # Lazy imports inside worker to avoid fork issues
@@ -42,6 +46,7 @@ def _eval_one(args):
     genome = Genome.load_bytes(genome_bytes)
     env = gym.make(env_id)
     rewards = []
+    total_steps = 0
     for ep in range(n_episodes):
         obs, _ = env.reset()
         total_reward = 0.0
@@ -53,91 +58,129 @@ def _eval_one(args):
                 action = np.clip(action, env.action_space.low, env.action_space.high)
             obs, reward, terminated, truncated, _ = env.step(action)
             total_reward += reward
+            total_steps += 1
             if terminated or truncated:
                 break
         rewards.append(total_reward)
     env.close()
-    return float(np.mean(rewards))
+    return float(np.mean(rewards)), int(total_steps)
+
+
+def _is_connection_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(k in text for k in [
+        'brokenpipeerror', 'eoferror', 'connectionreseterror',
+        'connection refused', 'broken pipe', 'eof', 'reset by peer'
+    ])
 
 
 def run_worker(host: str, port: int, authkey: bytes, local_workers: int,
                name: str = None):
-    """Connect to fleet manager and process evaluation jobs."""
+    """Connect to fleet manager and process evaluation jobs.
+
+    Resilient mode: if manager connection drops (EOF/BrokenPipe/etc),
+    tear down local state and reconnect instead of exiting permanently.
+    """
     if name is None:
         name = f"worker-{socket.gethostname()}"
 
-    print(f"[{name}] Connecting to {host}:{port}...")
-    manager = FleetManager(address=(host, port), authkey=authkey)
+    while True:
+        print(f"[{name}] Connecting to {host}:{port}...")
+        manager = FleetManager(address=(host, port), authkey=authkey)
 
-    # Retry connection
-    for attempt in range(30):
-        try:
-            manager.connect()
-            break
-        except ConnectionRefusedError:
-            if attempt < 29:
-                time.sleep(2)
-            else:
-                print(f"[{name}] Could not connect after 30 attempts")
-                return
-
-    work_q = manager.get_work_queue()
-    result_q = manager.get_result_queue()
-    register_q = manager.get_register_queue()
-
-    # Announce ourselves
-    register_q.put(name)
-    print(f"[{name}] Connected, {local_workers} local workers")
-
-    # Create local process pool
-    pool = Pool(local_workers)
-
-    try:
-        while True:
-            # Collect a batch of jobs
-            batch = []
+        # Retry connection
+        connected = False
+        for attempt in range(30):
             try:
-                job = work_q.get(timeout=30)
-                if job is None:  # poison pill
-                    print(f"[{name}] Received shutdown signal")
-                    break
-                batch.append(job)
-            except Exception:
-                continue
-
-            # Grab more if available (up to local_workers worth)
-            for _ in range(local_workers * 2 - 1):
-                try:
-                    job = work_q.get_nowait()
-                    if job is None:
-                        break
-                    batch.append(job)
-                except Exception:
-                    break
-
-            if not batch:
-                continue
-
-            # Evaluate batch locally in parallel
-            eval_args = [(gb, env_id, n_ep, ms) for (idx, gb, env_id, n_ep, ms) in batch]
-            indices = [idx for (idx, gb, env_id, n_ep, ms) in batch]
-
-            try:
-                fitnesses = pool.map(_eval_one, eval_args)
-                for idx, fit in zip(indices, fitnesses):
-                    result_q.put((idx, fit))
+                manager.connect()
+                connected = True
+                break
             except Exception as e:
-                print(f"[{name}] Eval error: {e}")
-                # Return worst fitness for failed jobs
-                for idx in indices:
-                    result_q.put((idx, -999.0))
+                if attempt < 29:
+                    time.sleep(2)
+                else:
+                    print(f"[{name}] Could not connect after 30 attempts: {e}")
+        if not connected:
+            # Keep trying in resilient mode
+            time.sleep(5)
+            continue
 
-    except KeyboardInterrupt:
-        pass
-    finally:
-        pool.terminate()
-        pool.join()
-        print(f"[{name}] Shut down")
+        work_q = manager.get_work_queue()
+        result_q = manager.get_result_queue()
+        register_q = manager.get_register_queue()
+
+        # Announce ourselves
+        try:
+            register_q.put(name)
+        except Exception as e:
+            print(f"[{name}] register failed: {e}")
+            time.sleep(2)
+            continue
+
+        print(f"[{name}] Connected, {local_workers} local workers")
+
+        # Create local process pool for this manager session
+        pool = Pool(local_workers)
+
+        try:
+            while True:
+                batch = []
+                try:
+                    job = work_q.get(timeout=30)
+                    if job is None:  # poison pill
+                        print(f"[{name}] Received shutdown signal")
+                        return
+                    batch.append(job)
+                except Exception as e:
+                    if _is_connection_error(e):
+                        print(f"[{name}] manager connection lost while waiting for work: {e}")
+                        break
+                    continue
+
+                for _ in range(local_workers * 2 - 1):
+                    try:
+                        job = work_q.get_nowait()
+                        if job is None:
+                            return
+                        batch.append(job)
+                    except Exception as e:
+                        if _is_connection_error(e):
+                            print(f"[{name}] manager connection lost during batch fetch: {e}")
+                            break
+                        break
+
+                if not batch:
+                    continue
+
+                eval_args = [(gb, env_id, n_ep, ms) for (idx, gb, env_id, n_ep, ms) in batch]
+                indices = [idx for (idx, gb, env_id, n_ep, ms) in batch]
+
+                try:
+                    results = pool.map(_eval_one, eval_args)
+                except Exception as e:
+                    print(f"[{name}] Eval error: {e}")
+                    results = [(-999.0, 0)] * len(indices)
+
+                for idx, payload in zip(indices, results):
+                    try:
+                        if isinstance(payload, tuple):
+                            fit, steps = payload
+                        else:
+                            fit, steps = payload, 0
+                        result_q.put((idx, fit, int(steps)))
+                    except Exception as e:
+                        if _is_connection_error(e):
+                            print(f"[{name}] manager connection lost while sending result: {e}")
+                            break
+                        raise
+
+        except KeyboardInterrupt:
+            return
+        finally:
+            pool.terminate()
+            pool.join()
+            print(f"[{name}] Reconnecting...")
+            time.sleep(2)
 
 
 def main():

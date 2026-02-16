@@ -9,26 +9,40 @@ Features:
 """
 
 import os
+import time
 import torch
 from multiprocessing import Pool as _Pool
 import numpy as np
 import gymnasium as gym
 from typing import List, Dict
-from .genome import (Genome, Policy, FlexiblePolicy, ChunkMutator, TransformerMutator, 
-                      GaussianMutator, ErrorCorrectorMutator, CompatibilityNet)
+from .genome import (
+    Genome,
+    Policy,
+    PolicyCNN,
+    FlexiblePolicy,
+    CompatibilityNet,
+    create_mutator,
+    available_mutator_types,
+)
 
 from .snake_env import ensure_snake_registered
+from .speciation import assign_species
 # Module-level pool for reuse across generations
 _worker_pool = None
 _worker_pool_size = 0
 
 
 def evaluate_genome(genome: Genome, env_id: str, n_episodes: int = 5,
-                    max_steps: int = 1000, seeds=None) -> float:
-    """Evaluate a genome's policy on an environment. Returns mean reward."""
+                    max_steps: int = 1000, seeds=None) -> tuple[float, int]:
+    """Evaluate a genome's policy on an environment.
+
+    Returns:
+        (mean_reward, env_steps)
+    """
     ensure_snake_registered()
     env = gym.make(env_id)
     rewards = []
+    total_steps = 0
     for ep in range(n_episodes):
         seed = seeds[ep] if seeds and ep < len(seeds) else None
         obs, _ = env.reset(seed=seed) if seed is not None else env.reset()
@@ -41,17 +55,17 @@ def evaluate_genome(genome: Genome, env_id: str, n_episodes: int = 5,
                 action = np.clip(action, env.action_space.low, env.action_space.high)
             obs, reward, terminated, truncated, _ = env.step(action)
             total_reward += reward
+            total_steps += 1
             if terminated or truncated:
                 break
         rewards.append(total_reward)
     env.close()
-    return float(np.mean(rewards))
+    return float(np.mean(rewards)), int(total_steps)
 
 
 def _eval_worker(args):
     """Worker for parallel genome evaluation. Receives serialized genome bytes."""
     genome_bytes, env_id, n_episodes, max_steps = args
-    import io
     genome = Genome.load_bytes(genome_bytes)
     return evaluate_genome(genome, env_id, n_episodes, max_steps)
 
@@ -69,19 +83,54 @@ def _get_pool(n_workers: int) -> _Pool:
 
 def evaluate_population(population: List[Genome], env_id: str,
                         n_episodes: int = 5, max_steps: int = 1000,
-                        n_workers: int = 1, fleet=None) -> List[float]:
-    """Evaluate all genomes, optionally in parallel or via fleet."""
+                        n_workers: int = 1, fleet=None) -> tuple[List[float], Dict]:
+    """Evaluate all genomes, optionally in parallel or via fleet.
+
+    Returns:
+        (fitnesses, eval_profile)
+    """
     if fleet is not None:
         genomes_bytes = [g.to_bytes() for g in population]
         return fleet.evaluate_population(genomes_bytes, env_id, n_episodes, max_steps)
 
-    if n_workers <= 1:
-        return [evaluate_genome(g, env_id, n_episodes, max_steps) for g in population]
+    t0 = time.time()
 
+    if n_workers <= 1:
+        pairs = [evaluate_genome(g, env_id, n_episodes, max_steps) for g in population]
+        fitnesses = [p[0] for p in pairs]
+        steps = int(sum(p[1] for p in pairs))
+        elapsed = time.time() - t0
+        profile = {
+            'dispatch_sec': 0.0,
+            'remote_eval_sec': elapsed,
+            'result_gather_sec': 0.0,
+            'eval_total_sec': elapsed,
+            'env_steps': steps,
+            'genomes_evaluated': len(population),
+        }
+        return fitnesses, profile
+
+    t_dispatch0 = time.time()
     args = [(g.to_bytes(), env_id, n_episodes, max_steps) for g in population]
     pool = _get_pool(n_workers)
-    fitnesses = pool.map(_eval_worker, args)
-    return fitnesses
+    dispatch_sec = time.time() - t_dispatch0
+
+    t_eval0 = time.time()
+    pairs = pool.map(_eval_worker, args)
+    remote_eval_sec = time.time() - t_eval0
+
+    fitnesses = [p[0] for p in pairs]
+    steps = int(sum(p[1] for p in pairs))
+    elapsed = time.time() - t0
+    profile = {
+        'dispatch_sec': dispatch_sec,
+        'remote_eval_sec': remote_eval_sec,
+        'result_gather_sec': 0.0,
+        'eval_total_sec': elapsed,
+        'env_steps': steps,
+        'genomes_evaluated': len(population),
+    }
+    return fitnesses, profile
 
 
 def create_population(pop_size: int, obs_dim: int, act_dim: int,
@@ -89,27 +138,26 @@ def create_population(pop_size: int, obs_dim: int, act_dim: int,
                       chunk_size: int = 64,
                       speciation: bool = False,
                       flex: bool = False,
-                      output_dir: str = None) -> List[Genome]:
+                      policy_arch: str = 'mlp',
+                      output_dir: str = None,
+                      mutator_kwargs: dict | None = None) -> List[Genome]:
     """Create initial population. If speciation=True, each genome gets a CompatibilityNet."""
     population = []
     for _ in range(pop_size):
-        if flex:
+        if policy_arch == 'cnn':
+            policy = PolicyCNN(obs_dim, act_dim)
+        elif flex:
             # Random small architecture: 1-2 layers, 32-64 neurons each
             n_layers = np.random.randint(1, 3)
             layer_sizes = [np.random.choice([32, 48, 64]) for _ in range(n_layers)]
             policy = FlexiblePolicy(obs_dim, act_dim, layer_sizes)
         else:
             policy = Policy(obs_dim, act_dim, hidden)
-        if mutator_type == 'chunk':
-            mutator = ChunkMutator(chunk_size=chunk_size)
-        elif mutator_type == 'transformer':
-            mutator = TransformerMutator(chunk_size=chunk_size)
-        elif mutator_type == 'gaussian':
-            mutator = GaussianMutator()
-        elif mutator_type == 'corrector':
-            mutator = ErrorCorrectorMutator(chunk_size=chunk_size)
-        else:
+        if mutator_type not in available_mutator_types():
             raise ValueError(f"Unknown mutator type: {mutator_type}")
+        mk = dict(mutator_kwargs or {})
+        mk.setdefault('chunk_size', chunk_size)
+        mutator = create_mutator(mutator_type, **mk)
         
         compat_net = None
         if speciation:
@@ -164,45 +212,6 @@ def tournament_select(population: List[Genome], k: int = 3) -> Genome:
     contestants = np.random.choice(len(population), size=min(k, len(population)), replace=False)
     best = max(contestants, key=lambda i: population[i].fitness)
     return population[best]
-
-
-def assign_species(population: List[Genome], compat_threshold: float = 0.5) -> Dict:
-    """Assign species using learned species tags (embedding distance clustering)."""
-    if population[0].compat_net is None:
-        for g in population:
-            g.species_id = 0
-        return {'num_species': 1, 'species_sizes': {0: len(population)},
-                'crossover_attempts': 0, 'crossover_compatible': 0}
-    
-    # Get all species tags
-    tags = [g.get_species_tag() for g in population]
-    
-    # Greedy clustering by tag distance
-    from src.genome import CompatibilityNet
-    max_dist = compat_threshold * (CompatibilityNet.EMBED_DIM ** 0.5)
-    
-    representatives = []  # (species_id, tag_tensor)
-    species_counter = 0
-    
-    for i, (g, tag) in enumerate(zip(population, tags)):
-        assigned = False
-        for sid, rep_tag in representatives:
-            dist = torch.norm(tag - rep_tag).item()
-            if dist < max_dist:
-                g.species_id = sid
-                assigned = True
-                break
-        if not assigned:
-            g.species_id = species_counter
-            representatives.append((species_counter, tag))
-            species_counter += 1
-    
-    species_sizes = {}
-    for g in population:
-        species_sizes[g.species_id] = species_sizes.get(g.species_id, 0) + 1
-    
-    return {'num_species': len(species_sizes), 'species_sizes': species_sizes,
-            'crossover_attempts': 0, 'crossover_compatible': 0}
 
 
 def evolve_generation(population: List[Genome], crossover_rate: float = 0.3,
@@ -280,11 +289,13 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
                   speciation: bool = False,
                   compat_threshold: float = 0.5,
                   flex: bool = False,
+                  policy_arch: str = 'mlp',
                   complexity_cost: float = 0.0,
                   output_dir: str = None,
                   n_workers: int = 1,
                   fleet=None,
-                  progress_callback=None) -> Dict:
+                  progress_callback=None,
+                  mutator_kwargs: dict | None = None) -> Dict:
     """
     Main evolution loop with true self-replication.
 
@@ -308,13 +319,15 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
 
     population = create_population(pop_size, obs_dim, act_dim, mutator_type,
                                    hidden, chunk_size, speciation=speciation,
-                                   flex=flex, output_dir=output_dir)
+                                   flex=flex, policy_arch=policy_arch, output_dir=output_dir,
+                                   mutator_kwargs=mutator_kwargs)
     genome = population[0]
     print(f"Genome: {genome.num_policy_params()} policy params + "
           f"{genome.num_mutator_params()} mutator params + "
           f"{genome.num_compat_params()} compat params = "
           f"{genome.num_total_params()} total")
     print(f"Mutator type: {mutator_type}")
+    print(f"Policy arch: {policy_arch}")
     print(f"Speciation: {'learned' if speciation else 'off'}")
     print(f"Population: {pop_size}, Generations: {generations}")
     print()
@@ -331,6 +344,9 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
         'mean_mutator_drift': [],
         'max_mutator_drift': [],
         'num_species': [],
+        'species_entropy': [],
+        'species_tag_dist_mean': [],
+        'species_tag_dist_std': [],
         'crossover_compat_rate': [],
         'mean_layers': [],
         'max_layers': [],
@@ -339,6 +355,17 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
         'structural_mutations': [],
         'mean_policy_params': [],
         'min_policy_params': [],
+        # Profiling / throughput
+        'gen_wall_sec': [],
+        'dispatch_sec': [],
+        'remote_eval_sec': [],
+        'result_gather_sec': [],
+        'evolution_step_sec': [],
+        'logging_checkpoint_sec': [],
+        'env_steps': [],
+        'env_steps_per_sec': [],
+        'genomes_evaluated': [],
+        'genomes_per_sec': [],
     }
 
     if complexity_cost > 0:
@@ -346,27 +373,25 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
     if n_workers > 1:
         print(f"Parallel evaluation: {n_workers} workers")
 
-    for gen in range(generations):
-        # Evaluate fitness — pure environment reward
-        raw_fitnesses = evaluate_population(population, env_id, n_eval_episodes,
-                                            n_workers=n_workers, fleet=fleet)
+    # ── Helper: process results for a generation ──────────────────
+    def _process_gen(gen, population, raw_fitnesses, eval_profile, gen_t0):
+        """Score population, log stats, evolve next gen. Returns (new_pop, species_info, evolution_step_sec, logging_checkpoint_sec)."""
         for g, raw in zip(population, raw_fitnesses):
             g.fitness = raw
-        
-        # Complexity penalty: penalize larger networks (encourages parsimony)
+
+        # Complexity penalty
         if complexity_cost > 0:
             for g in population:
                 penalty = complexity_cost * g.num_policy_params()
                 g.fitness -= penalty
 
-        # Fitness sharing: divide by species size to reward diversity
+        # Fitness sharing
         if speciation:
             spec_info_pre = assign_species(population, compat_threshold)
             for g in population:
                 species_size = spec_info_pre['species_sizes'].get(g.species_id, 1)
                 g.fitness = g.fitness / (species_size ** 0.5)
 
-        # Use raw fitnesses for tracking (not shared)
         fitnesses = raw_fitnesses if speciation else [g.fitness for g in population]
         fidelities = [g.self_replication_fidelity for g in population]
 
@@ -375,7 +400,8 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
         mean_fit = np.mean(fitnesses)
         worst_fit = min(fitnesses)
 
-        # Save best genome (current gen + best-ever)
+        t_log0 = time.time()
+
         if output_dir is not None:
             best_genome_path = os.path.join(output_dir, 'best_genome.pt')
             population[best_idx].save(best_genome_path)
@@ -384,7 +410,6 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
                 best_ever_path = os.path.join(output_dir, 'best_ever_genome.pt')
                 population[best_idx].save(best_ever_path)
 
-        # Compute mutator drift from generation 0
         drifts = []
         for i, g in enumerate(population):
             current_mutator = g.get_flat_mutator_weights()
@@ -392,7 +417,6 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
             drift = torch.norm(current_mutator - initial_mutator_weights[ref_idx]).item()
             drifts.append(drift)
 
-        # Architecture stats (flex mode)
         if flex:
             layers_list = [len(g.policy.layer_sizes) for g in population]
             neurons_list = [sum(g.policy.layer_sizes) for g in population]
@@ -403,7 +427,6 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
             history['max_neurons'].append(max(neurons_list))
             history['structural_mutations'].append(struct_muts)
 
-        # Track parameter counts
         param_counts = [g.num_policy_params() for g in population]
         history['mean_policy_params'].append(float(np.mean(param_counts)))
         history['min_policy_params'].append(min(param_counts))
@@ -428,18 +451,105 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
             best_ever = max(history['best']) if history['best'] else best_fit
             progress_callback(gen, generations, best_fit, mean_fit, best_ever)
 
-        population, species_info = evolve_generation(
+        logging_checkpoint_sec = time.time() - t_log0
+
+        t_evolve0 = time.time()
+        new_population, species_info = evolve_generation(
             population, crossover_rate, elitism=5, generation=gen,
             max_generations=generations, compat_threshold=compat_threshold)
-        
+        evolution_step_sec = time.time() - t_evolve0
+
+        # Record species/perf stats
         history['num_species'].append(species_info['num_species'])
+        history['species_entropy'].append(float(species_info.get('species_entropy', 0.0)))
+        history['species_tag_dist_mean'].append(float(species_info.get('tag_dist_mean', 0.0)))
+        history['species_tag_dist_std'].append(float(species_info.get('tag_dist_std', 0.0)))
         compat_rate = (species_info['crossover_compatible'] / max(species_info['crossover_attempts'], 1))
         history['crossover_compat_rate'].append(compat_rate)
-        
+
+        gen_wall_sec = time.time() - gen_t0
+        env_steps = int(eval_profile.get('env_steps', 0))
+        genomes_evald = int(eval_profile.get('genomes_evaluated', len(population)))
+        steps_per_sec = (env_steps / gen_wall_sec) if gen_wall_sec > 0 else 0.0
+        genomes_per_sec = (genomes_evald / gen_wall_sec) if gen_wall_sec > 0 else 0.0
+
+        history['gen_wall_sec'].append(float(gen_wall_sec))
+        history['dispatch_sec'].append(float(eval_profile.get('dispatch_sec', 0.0)))
+        history['remote_eval_sec'].append(float(eval_profile.get('remote_eval_sec', 0.0)))
+        history['result_gather_sec'].append(float(eval_profile.get('result_gather_sec', 0.0)))
+        history['evolution_step_sec'].append(float(evolution_step_sec))
+        history['logging_checkpoint_sec'].append(float(logging_checkpoint_sec))
+        history['env_steps'].append(env_steps)
+        history['env_steps_per_sec'].append(float(steps_per_sec))
+        history['genomes_evaluated'].append(genomes_evald)
+        history['genomes_per_sec'].append(float(genomes_per_sec))
+
         if speciation and gen % log_interval == 0:
             sizes = species_info['species_sizes']
             print(f"         Species: {species_info['num_species']} | "
+                  f"Entropy: {species_info.get('species_entropy', 0.0):.3f} | "
+                  f"TagDist μ/σ: {species_info.get('tag_dist_mean', 0.0):.3f}/{species_info.get('tag_dist_std', 0.0):.3f} | "
                   f"Compat rate: {compat_rate:.2f} | "
                   f"Sizes: {dict(sorted(sizes.items()))}")
+
+        if gen % log_interval == 0:
+            print(f"         Perf: {steps_per_sec:8.1f} env_steps/s | "
+                  f"{genomes_per_sec:6.2f} genomes/s | "
+                  f"dispatch {eval_profile.get('dispatch_sec', 0.0):.3f}s | "
+                  f"eval {eval_profile.get('remote_eval_sec', 0.0):.3f}s | "
+                  f"gather {eval_profile.get('result_gather_sec', 0.0):.3f}s | "
+                  f"evolve {evolution_step_sec:.3f}s | "
+                  f"log/ckpt {logging_checkpoint_sec:.3f}s")
+
+        return new_population
+
+    # ── Pipelined fleet mode vs standard sequential ─────────────
+    use_pipeline = (fleet is not None and hasattr(fleet, 'dispatch'))
+
+    if use_pipeline:
+        # Pipeline: overlap evolve/log of gen N with eval of gen N+1
+        #
+        # Gen 0: dispatch → collect (blocking, no overlap possible)
+        # Gen 1+: while workers eval gen N+1, we process gen N results
+        #
+        # Timeline:
+        #   dispatch(pop_0)
+        #   collect(pop_0) results  ← blocking
+        #   process gen 0 + evolve → pop_1
+        #   dispatch(pop_1)         ← workers start immediately
+        #   [process gen 0 stats already done, workers running]
+        #   collect(pop_1) results  ← blocking, but overlapped with dispatch
+        #   process gen 1 + evolve → pop_2
+        #   dispatch(pop_2)
+        #   ...
+
+        for gen in range(generations):
+            gen_t0 = time.time()
+
+            if gen == 0:
+                # First gen: synchronous (nothing to overlap with)
+                raw_fitnesses, eval_profile = evaluate_population(
+                    population, env_id, n_eval_episodes, n_workers=n_workers, fleet=fleet
+                )
+            else:
+                # Collect results dispatched at end of previous iteration
+                raw_fitnesses, eval_profile = fleet.collect()
+
+            # Process results + evolve next generation
+            population = _process_gen(gen, population, raw_fitnesses, eval_profile, gen_t0)
+
+            # Pre-dispatch next gen to workers (if not last gen)
+            if gen < generations - 1:
+                genomes_bytes = [g.to_bytes() for g in population]
+                fleet.dispatch(genomes_bytes, env_id, n_eval_episodes)
+    else:
+        # Standard sequential mode (local eval or non-pipeline fleet)
+        for gen in range(generations):
+            gen_t0 = time.time()
+
+            raw_fitnesses, eval_profile = evaluate_population(
+                population, env_id, n_eval_episodes, n_workers=n_workers, fleet=fleet
+            )
+            population = _process_gen(gen, population, raw_fitnesses, eval_profile, gen_t0)
 
     return history

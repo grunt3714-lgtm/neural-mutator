@@ -26,11 +26,19 @@ When the mutator must also replicate its own weights (not just the policy), lear
 
 ![Self-Replication](docs/plots/self_replication_comparison.png)
 
-### LunarLander Progress
+### LunarLander — Fleet Training (4-Node Cluster)
 
-Active runs comparing flexible architecture with and without complexity cost, plus learned speciation.
+**Best ever: 291.06** — dualmixture mutator + flex architecture + learned speciation, pop 160, 10 episodes, 4 nodes × 6 workers (24 parallel evaluators).
 
-![LunarLander](docs/plots/lunar_lander_progress.png)
+![LunarLander Multiplot](results/lunar_s45_300g_fleet/lunar_s45_300g_multiplot.png)
+
+**Best genome in action** (reward 276):
+
+![LunarLander Best](results/lunar_s45_300g_fleet/lunar_s45_best.gif)
+
+**Weight analysis** — 667 params (8→51→4, Tanh). Angular velocity and angle dominate input importance:
+
+![Weight Analysis](results/lunar_s45_300g_fleet/lunar_s45_weights.png)
 
 ## Architecture
 
@@ -69,13 +77,14 @@ Crossover (learned recombination):
 | **Chunk MLP** | Processes weights in fixed-size chunks | Dedicated `cross_net` sees both parents' chunks |
 | **Transformer** | Self-attention over weight segments | Cross-attention embedding of both parents |
 | **Error Corrector** | Learned reference + targeted corrections | Encodes parent midpoint, corrects toward reference |
+| **DualMixture** | NN mutator + Gaussian escape hatch (configurable p) | NN-guided crossover with Gaussian fallback |
 
 ## Environments
 
 | Environment | Best Result | Architecture |
 |-------------|-----------|--------------|
 | CartPole-v1 | **500** (solved) | 9 neurons, 1 layer (with CC) |
-| LunarLander-v3 | **~290** | 34 neurons, 1 layer (with CC) |
+| LunarLander-v3 | **291** (solved) | 51 neurons, 1 layer (dualmixture+flex+spec) |
 | Acrobot-v1 | **-70.7** | 64 hidden |
 | Pendulum-v1 | **-201.5** | 64 hidden |
 | MountainCar-v0 | **-104** | 64 hidden |
@@ -111,6 +120,16 @@ python -m src.train \
     --speciation \
     --compat-threshold 0.5 \
     --generations 300
+
+# Fleet training (distributed across nodes)
+python -m src.train \
+    --env LunarLander-v3 \
+    --mutator dualmixture \
+    --flex --speciation \
+    --pop-size 160 --generations 300 --episodes 10 \
+    --fleet --fleet-port 5611 --fleet-workers 4
+# Then on each worker node:
+python -m fleet.worker --host <manager-ip> --port 5611 --workers 6 --name node1
 
 # Render gameplay from saved genome
 python render_best.py results/my_run/best_genome.pt /tmp/gameplay.gif LunarLander-v3

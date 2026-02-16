@@ -60,19 +60,10 @@ class FleetEvaluator:
                     pass
             print(f"[fleet] All {len(self._workers)} workers ready")
 
-    def evaluate_population(self, genomes_bytes: List[bytes], env_id: str,
-                            n_episodes: int = 5, max_steps: int = 1000) -> List[float]:
-        """Send genomes to workers, collect fitnesses. Blocks until all done."""
-        n = len(genomes_bytes)
+    # ── Async dispatch/collect API (for pipelined evolution) ──────────
 
-        # Drain any stale results
-        while not self._result_queue.empty():
-            try:
-                self._result_queue.get_nowait()
-            except Exception:
-                break
-
-        # Check for new worker registrations (non-blocking)
+    def _check_new_workers(self):
+        """Non-blocking drain of register queue."""
         while not self._register_queue.empty():
             try:
                 name = self._register_queue.get_nowait()
@@ -82,32 +73,92 @@ class FleetEvaluator:
             except Exception:
                 break
 
-        # Dispatch all jobs
+    def _drain_stale_results(self):
+        """Drain stale results from previous generation."""
+        while not self._result_queue.empty():
+            try:
+                self._result_queue.get_nowait()
+            except Exception:
+                break
+
+    def dispatch(self, genomes_bytes: List[bytes], env_id: str,
+                 n_episodes: int = 5, max_steps: int = 1000) -> dict:
+        """Send all genomes to workers (non-blocking). Returns dispatch metadata.
+
+        Call collect() later to gather results.
+        """
+        n = len(genomes_bytes)
+        self._drain_stale_results()
+        self._check_new_workers()
+
+        t0 = time.time()
         for i, gb in enumerate(genomes_bytes):
             self._work_queue.put((i, gb, env_id, n_episodes, max_steps))
+        dispatch_sec = time.time() - t0
 
-        # Collect results
+        # Store pending state
+        self._pending_n = n
+        self._pending_t0 = time.time()
+        self._pending_dispatch_sec = dispatch_sec
+        return {'dispatch_sec': dispatch_sec, 'n': n}
+
+    def collect(self) -> tuple:
+        """Block until all dispatched results arrive.
+
+        Returns:
+            (fitnesses, eval_profile)
+        """
+        n = self._pending_n
         results = [None] * n
+        step_counts = [0] * n
         collected = 0
-        t0 = time.time()
 
         while collected < n:
             try:
-                idx, fitness = self._result_queue.get(timeout=120)
+                payload = self._result_queue.get(timeout=120)
+                if len(payload) == 2:
+                    idx, fitness = payload
+                    steps = 0
+                else:
+                    idx, fitness, steps = payload
                 if results[idx] is None:
                     results[idx] = fitness
+                    step_counts[idx] = int(steps)
                     collected += 1
             except Exception:
-                elapsed = time.time() - t0
+                elapsed = time.time() - self._pending_t0
                 print(f"[fleet] Warning: timeout waiting for results "
                       f"({collected}/{n} after {elapsed:.0f}s)")
-                # Fill missing with worst possible
                 for i in range(n):
                     if results[i] is None:
                         results[i] = -999.0
+                        step_counts[i] = 0
                         collected += 1
 
-        return results
+        remote_eval_sec = time.time() - self._pending_t0
+        total_sec = self._pending_dispatch_sec + remote_eval_sec
+        profile = {
+            'dispatch_sec': float(self._pending_dispatch_sec),
+            'remote_eval_sec': float(remote_eval_sec),
+            'result_gather_sec': 0.0,
+            'eval_total_sec': float(total_sec),
+            'env_steps': int(sum(step_counts)),
+            'genomes_evaluated': int(n),
+            'active_workers': int(len(self._workers)),
+        }
+        return results, profile
+
+    # ── Synchronous convenience (backwards-compatible) ──────────────
+
+    def evaluate_population(self, genomes_bytes: List[bytes], env_id: str,
+                            n_episodes: int = 5, max_steps: int = 1000):
+        """Send genomes to workers, collect fitnesses. Blocks until all done.
+
+        Returns:
+            (fitnesses, eval_profile)
+        """
+        self.dispatch(genomes_bytes, env_id, n_episodes, max_steps)
+        return self.collect()
 
     def shutdown(self):
         # Send poison pills
