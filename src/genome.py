@@ -1057,6 +1057,9 @@ class Genome:
         else:
             data['flex'] = False
             data['hidden'] = self.policy.net[0].out_features
+        if self.compat_net is not None:
+            data['compat_state'] = self.compat_net.state_dict()
+            data['compat_genome_dim'] = self.compat_net.genome_dim
         torch.save(data, path)
 
     @staticmethod
@@ -1084,7 +1087,11 @@ class Genome:
             mutator_key = 'dualmixture'
         mutator = create_mutator(mutator_key)
         mutator.load_state_dict(data['mutator_state'])
-        genome = Genome(policy, mutator, mutator_type=mutator_key)
+        compat_net = None
+        if 'compat_state' in data:
+            compat_net = CompatibilityNet(data['compat_genome_dim'])
+            compat_net.load_state_dict(data['compat_state'])
+        genome = Genome(policy, mutator, mutator_type=mutator_key, compat_net=compat_net)
         genome.fitness = data.get('fitness', 0.0)
         return genome
 
