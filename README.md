@@ -1,73 +1,91 @@
 # Neural Mutator — Self-Replicating Neuroevolution
 
-Evolve neural networks that **mutate their own weights**. Each genome contains a **policy** (plays the environment) and a **mutator** (rewrites the entire genome, including itself). Natural selection is the only filter — mutators that destroy themselves die, those that improve themselves thrive.
-
-![Architecture](docs/plots/architecture.png)
-
-## Key Results
-
-### Complexity Cost — Networks Learn to Be Smaller
-
-With a per-parameter fitness penalty (`--complexity-cost`), networks evolve to minimal viable size while maintaining full performance.
-
-**CartPole-v1:** 74 → 9 neurons (88% reduction), same 500 fitness.
-
-![Complexity Cost CartPole](docs/plots/complexity_cost_cartpole.png)
-
-### Multi-Environment Comparison
-
-Self-replicating Gaussian mutator vs Chunk MLP vs Transformer across 5 environments, 300 generations each.
-
-![Multi-Env Comparison](docs/plots/multi_env_comparison.png)
-
-### Self-Replication — Mutators That Reproduce Themselves
-
-When the mutator must also replicate its own weights (not just the policy), learned mutators outperform Gaussian on CartPole — the opposite of runs without self-replication pressure.
-
-![Self-Replication](docs/plots/self_replication_comparison.png)
-
-### LunarLander — Fleet Training (4-Node Cluster)
-
-**Best ever: 291.06** — dualmixture mutator + flex architecture + learned speciation, pop 160, 10 episodes, 4 nodes × 6 workers (24 parallel evaluators).
-
-![LunarLander Multiplot](results/lunar_s45_300g_fleet/lunar_s45_300g_multiplot.png)
-
-**Best genome in action** (reward 276):
-
-![LunarLander Best](results/lunar_s45_300g_fleet/lunar_s45_best.gif)
-
-**Weight analysis** — 667 params (8→51→4, Tanh). Angular velocity and angle dominate input importance:
-
-![Weight Analysis](results/lunar_s45_300g_fleet/lunar_s45_weights.png)
+Evolve neural networks that **mutate their own weights**. Each genome contains a **policy** (plays the environment), a **mutator** (rewrites the entire genome, including itself), and a **compatibility network** (decides who can crossover). Natural selection is the only filter — mutators that destroy themselves die, those that improve themselves thrive.
 
 ## Architecture
 
-```
-Genome = [Policy θ_p, Mutator θ_m]
+![Architecture](docs/plots/architecture.png)
 
-Reproduction (self-replication):
-  θ' = Mutator(θ_m)(concat(θ_p, θ_m))
-  → θ'_p = θ'[:len(θ_p)]     # new policy
-  → θ'_m = θ'[len(θ_p):]     # new mutator weights
+The system has five key components:
 
-Crossover (learned recombination):
-  θ_child = Mutator_A(θ_p_A, θ_p_B)
-  → Mutator sees BOTH parents and decides how to combine them
-```
+- **(a) Genome** — Three co-evolved networks: policy θ_p, mutator θ_m, and compatibility θ_c
+- **(b) DualMixture Reproduction** — 80% learned corrections via encoder→corrector pipeline, 20% Gaussian escape hatch (ratio evolved independently across environments, converges to ~20% universally)
+- **(c) Evolutionary Loop** — Evaluate → select → speciate → reproduce → structural mutation
+- **(d) Learned Speciation** — Compatibility network scores pairwise genome similarity to form breeding groups
+- **(e) Learned Crossover** — Mutator network sees both parents and decides how to combine them
 
-### Asymmetric Mutation Rates
-- Policy weights mutate at **1.0×** rate
-- Mutator weights mutate at **0.1×** rate (stability)
-- This prevents the mutator from destroying itself while still allowing adaptation
+The mutator is **self-referential**: since θ_m ⊂ θ, the mutator rewrites its own weights through its own output.
 
-## Features
+## Results
 
-- **Flexible Architecture** (`--flex`): Networks can add/remove neurons and layers via structural mutations
-- **Complexity Cost** (`--complexity-cost`): Per-parameter fitness penalty that evolves smaller networks
-- **Parallel Evaluation** (`--workers N`): Multiprocessing pool, ~3.5× speedup with 6 workers
-- **Learned Crossover**: Mutator receives both parents' weights and outputs the child
-- **Learned Speciation** (`--speciation`): Each genome carries a CompatibilityNet that decides who it can crossover with
-- **Genome Save/Load**: Auto-saves `best_genome.pt` each generation for rendering and analysis
+All runs use the DualMixture mutator with flexible architecture and learned speciation.
+
+### CartPole-v1
+
+**Solved in 2 generations.** Best: 500 (maximum). Mean converges to ~484 by gen 50.
+
+| | |
+|---|---|
+| ![CartPole Training](results/cartpole_dm_flex_s45_50g/training_plot.png) | ![CartPole Best](results/cartpole_dm_flex_s45_50g/best_gameplay.gif) |
+
+- **Pop:** 80 · **Gens:** 50 · **Episodes:** 5 · **Seed:** 45
+- **Final architecture:** 4→64→2 (Tanh), 386 params
+- **Mutator:** 8,374 params (21.7× larger than the policy it evolves)
+
+### LunarLander-v3
+
+**Best: 291.06** — well above the 200 solve threshold. Fleet-trained across 4 nodes (24 parallel workers).
+
+| | |
+|---|---|
+| ![LunarLander Training](results/lunar_s45_300g_fleet/training_plot.png) | ![LunarLander Best](results/lunar_s45_300g_fleet/best_gameplay.gif) |
+
+- **Pop:** 160 · **Gens:** 300 · **Episodes:** 10 · **Seed:** 45 · **Fleet:** 4 nodes × 6 workers
+- **Final architecture:** 8→51→4 (Tanh), 667 params
+- **Weight analysis:** Angular velocity and angle dominate input importance — the network learned that orientation control is key for landing
+
+### Acrobot-v1
+
+**Best: -64.0** (previous baseline: -70.7). Swing-up solved efficiently.
+
+| | |
+|---|---|
+| ![Acrobot Training](results/acrobot_dm_flex_s45_300g/training_plot.png) | ![Acrobot Best](results/acrobot_dm_flex_s45_300g/best_gameplay.gif) |
+
+- **Pop:** 80 · **Gens:** 300 · **Episodes:** 10 · **Seed:** 45
+- **Final architecture:** 6→64→64→3 (Tanh), 2 layers, 112 neurons
+- **Fidelity:** Climbed to 0.038 — mutator learned stable self-replication
+
+### Pendulum-v1
+
+**Best: -112.3** with discrete action mapping (continuous control is inherently harder for neuroevolution). Architecture self-simplified from 128→48 neurons over 1000 generations.
+
+| | |
+|---|---|
+| ![Pendulum Training](results/pendulum_dm_flex_s45_1000g/training_plot.png) | ![Pendulum Best](results/pendulum_dm_flex_s45_1000g/best_gameplay.gif) |
+
+- **Pop:** 80 · **Gens:** 1000 · **Episodes:** 10 · **Seed:** 45
+- **Final architecture:** 3→32→32→1 (Tanh), 2 layers — evolved continuous output
+- **Fidelity:** 0.00 → 0.23 over 1000 gens — mutator never stopped improving self-replication
+- **Best test episode:** -10.01 (near-perfect upright balance)
+
+### Summary
+
+| Environment | Best Reward | Architecture | Gens | Status |
+|-------------|-----------|--------------|------|--------|
+| CartPole-v1 | **500** | 4→64→2, 1 layer | 50 | ✅ Solved (gen 2) |
+| LunarLander-v3 | **291** | 8→51→4, 1 layer | 300 | ✅ Solved |
+| Acrobot-v1 | **-64** | 6→64→64→3, 2 layers | 300 | ✅ Beat baseline |
+| Pendulum-v1 | **-112** | 3→32→32→1, 2 layers | 1000 | 📈 Improving |
+
+### Cross-Environment Findings
+
+The DualMixture mutator adapts its learned parameters per environment:
+
+- **p_gauss converges to ~20% across all environments** — this ratio appears to be a universal sweet spot
+- **Correction scales specialize**: CartPole (0.033) > Pendulum (0.028) > LunarLander (0.020) — harder problems demand finer precision
+- **The mutator is 12-22× larger than the policy** — the "how to improve" knowledge is far more complex than the solution itself
+- **Flexible architecture works**: networks self-compress to minimal viable size (CartPole: 128→64, Pendulum: 128→48)
 
 ## Mutator Architectures
 
@@ -78,16 +96,6 @@ Crossover (learned recombination):
 | **Transformer** | Self-attention over weight segments | Cross-attention embedding of both parents |
 | **Error Corrector** | Learned reference + targeted corrections | Encodes parent midpoint, corrects toward reference |
 | **DualMixture** | NN mutator + Gaussian escape hatch (configurable p) | NN-guided crossover with Gaussian fallback |
-
-## Environments
-
-| Environment | Best Result | Architecture |
-|-------------|-----------|--------------|
-| CartPole-v1 | **500** (solved) | 9 neurons, 1 layer (with CC) |
-| LunarLander-v3 | **291** (solved) | 51 neurons, 1 layer (dualmixture+flex+spec) |
-| Acrobot-v1 | **-70.7** | 64 hidden |
-| Pendulum-v1 | **-201.5** | 64 hidden |
-| MountainCar-v0 | **-104** | 64 hidden |
 
 ## Usage
 
@@ -100,26 +108,15 @@ pip install torch gymnasium matplotlib numpy
 # Basic run
 python -m src.train --env CartPole-v1 --mutator gaussian --generations 100
 
-# Full featured run
+# Full featured run with DualMixture
 python -m src.train \
     --env LunarLander-v3 \
-    --mutator gaussian \
-    --flex \
-    --complexity-cost 0.0001 \
-    --workers 6 \
-    --pop-size 60 \
+    --mutator dualmixture \
+    --flex --speciation \
+    --pop-size 80 \
     --generations 300 \
     --episodes 10 \
-    --output results/my_run
-
-# With speciation
-python -m src.train \
-    --env LunarLander-v3 \
-    --mutator gaussian \
-    --flex \
-    --speciation \
-    --compat-threshold 0.5 \
-    --generations 300
+    --workers 6
 
 # Fleet training (distributed across nodes)
 python -m src.train \
@@ -130,9 +127,6 @@ python -m src.train \
     --fleet --fleet-port 5611 --fleet-workers 4
 # Then on each worker node:
 python -m fleet.worker --host <manager-ip> --port 5611 --workers 6 --name node1
-
-# Render gameplay from saved genome
-python render_best.py results/my_run/best_genome.pt /tmp/gameplay.gif LunarLander-v3
 ```
 
 ## Key Properties
@@ -140,7 +134,8 @@ python render_best.py results/my_run/best_genome.pt /tmp/gameplay.gif LunarLande
 - **Self-referential**: The mutator modifies itself through its own output
 - **Evolvable variation operator**: Natural selection acts on the mutation strategy, not just the policy
 - **Learned recombination**: Crossover is performed by the mutator network, not fixed rules
-- **Parsimony pressure**: Complexity cost drives evolution toward minimal sufficient architectures
+- **Adaptive precision**: Correction scales evolve per-environment — tight for hard, loose for easy
+- **Parsimony pressure**: Flex architecture + selection drives evolution toward minimal networks
 
 ## Related Work
 
