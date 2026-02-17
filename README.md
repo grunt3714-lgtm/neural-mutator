@@ -119,9 +119,27 @@ The mutator's learned weights reveal how each environment shapes the mutation st
 
 ### Mutation Deltas Across Environments
 
-How the magnitude and distribution of mutations compare across all five environments:
+Running each environment's best mutator on its own best genome 10 times reveals what the mutator actually changes:
 
 ![Mutation Deltas](docs/plots/mutation_delta_all_envs.png)
+
+**Reading the delta heatmaps (column 2):** The vertical bands correspond to **layer boundaries** in the policy network. The mutator processes weights in 64-element chunks, and each layer's weights have different magnitudes and roles — so the corrector learns to produce different-sized deltas per region.
+
+**Per-environment weight maps:**
+
+| Environment | Policy Params | Weight Index Layout |
+|---|---|---|
+| **CartPole** | 226 | `[0-127]` input→hidden weight · `[128-159]` bias · `[160-225]` hidden→output |
+| **Acrobot** | 3,715 | `[0-447]` layer 1 · `[448-3567]` layer 2 (3,072 weights — dominant band) · `[3568-3714]` output |
+| **Pendulum** | 1,217 | `[0-127]` layer 1 · `[128-1183]` layer 2 (1,024 weights) · `[1184-1216]` output |
+| **LunarLander** | 667 | `[0-458]` input→hidden (408 weights + 51 bias) · `[459-666]` hidden→output |
+| **CarRacing** | 17,971 | `[0-391]` conv1 · `[392-2455]` conv2 · `[2456-6567]` conv3+4 · `[6568-8623]` conv6 · `[8624-17871]` **FC (9,216 params — barely mutated)** |
+
+**Key findings:**
+- **Bias boundaries** create visible band edges — biases get mutated differently than weights
+- **64-element chunk boundaries** create subtle periodic shifts in mutation magnitude
+- **CarRacing** is the most dramatic: the mutator learned to focus on conv layers and leave the large FC layer (9,216 params) nearly untouched — the feature extractors matter more than the action mapper
+- **Acrobot** shows near-zero deltas everywhere — the corrector failed to learn useful mutations, falling back on the 20% Gaussian noise for all progress
 
 ## Mutator Architecture
 
