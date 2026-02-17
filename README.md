@@ -75,7 +75,7 @@ All runs use the DualMixture mutator with flexible architecture and learned spec
 
 | Training | Gameplay (with activations) |
 |---|---|
-| ![CarRacing Training](results/carracing_dm_s45_100g_fleet/CarRacing-v3_dualmixture_spec_s45.png) | ![Gameplay](results/carracing_dm_s45_100g_fleet/best_gameplay.gif) |
+| ![CarRacing Training](results/carracing_dm_s45_100g_fleet/training_plot.png) | ![Gameplay](results/carracing_dm_s45_100g_fleet/best_gameplay.gif) |
 
 - **Pop:** 30 · **Gens:** 100 · **Episodes:** 3 · **Seed:** 45 · **Fleet:** 4 nodes
 - **Final architecture:** CNN — 3 conv layers (8→16→16→8 channels) + FC (288→32→3), 17,971 params
