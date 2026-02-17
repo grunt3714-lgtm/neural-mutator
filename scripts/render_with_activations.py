@@ -109,7 +109,8 @@ def draw_mlp_panel(activations, obs, action, info, game_h):
     d = ImageDraw.Draw(act_img)
     
     if info.get('discrete'):
-        chosen = int(action) if np.isscalar(action) else int(np.argmax(action))
+        chosen = int(action_arr[0]) if len(action_arr) == 1 and action_arr[0] == int(action_arr[0]) else int(np.argmax(action_arr))
+        if np.isscalar(action): chosen = int(action)
         out = activations.get('output', None)
         out_vals = out[0].numpy() if out is not None else np.zeros(len(act_names))
         for i, aname in enumerate(act_names):

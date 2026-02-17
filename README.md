@@ -24,9 +24,9 @@ All runs use the DualMixture mutator with flexible architecture and learned spec
 
 **Solved in 2 generations.** Best: 500 (maximum). Mean converges to ~484 by gen 50.
 
-| | |
+| Training | Gameplay (with activations) |
 |---|---|
-| ![CartPole Training](results/cartpole_dm_flex_s45_50g/training_plot.png) | ![CartPole Best](results/cartpole_dm_flex_s45_50g/best_gameplay.gif) |
+| ![CartPole Training](results/cartpole_dm_flex_s45_50g/training_plot.png) | <video src="results/cartpole_dm_flex_s45_50g/best_gameplay.mp4" width="400"> |
 
 - **Pop:** 80 · **Gens:** 50 · **Episodes:** 5 · **Seed:** 45
 - **Final architecture:** 4→64→2 (Tanh), 386 params
@@ -36,9 +36,9 @@ All runs use the DualMixture mutator with flexible architecture and learned spec
 
 **Best: 291.06** — well above the 200 solve threshold. Fleet-trained across 4 nodes (24 parallel workers).
 
-| | |
+| Training | Gameplay (with activations) |
 |---|---|
-| ![LunarLander Training](results/lunar_s45_300g_fleet/training_plot.png) | ![LunarLander Best](results/lunar_s45_300g_fleet/best_gameplay.gif) |
+| ![LunarLander Training](results/lunar_s45_300g_fleet/training_plot.png) | <video src="results/lunar_s45_300g_fleet/best_gameplay.mp4" width="400"> |
 
 - **Pop:** 160 · **Gens:** 300 · **Episodes:** 10 · **Seed:** 45 · **Fleet:** 4 nodes × 6 workers
 - **Final architecture:** 8→51→4 (Tanh), 667 params
@@ -48,9 +48,9 @@ All runs use the DualMixture mutator with flexible architecture and learned spec
 
 **Best: -64.0** (previous baseline: -70.7). Swing-up solved efficiently.
 
-| | |
+| Training | Gameplay (with activations) |
 |---|---|
-| ![Acrobot Training](results/acrobot_dm_flex_s45_300g/training_plot.png) | ![Acrobot Best](results/acrobot_dm_flex_s45_300g/best_gameplay.gif) |
+| ![Acrobot Training](results/acrobot_dm_flex_s45_300g/training_plot.png) | <video src="results/acrobot_dm_flex_s45_300g/best_gameplay.mp4" width="400"> |
 
 - **Pop:** 80 · **Gens:** 300 · **Episodes:** 10 · **Seed:** 45
 - **Final architecture:** 6→64→64→3 (Tanh), 2 layers, 112 neurons
@@ -60,9 +60,9 @@ All runs use the DualMixture mutator with flexible architecture and learned spec
 
 **Best: -112.3** with discrete action mapping (continuous control is inherently harder for neuroevolution). Architecture self-simplified from 128→48 neurons over 1000 generations.
 
-| | |
+| Training | Gameplay (with activations) |
 |---|---|
-| ![Pendulum Training](results/pendulum_dm_flex_s45_1000g/training_plot.png) | ![Pendulum Best](results/pendulum_dm_flex_s45_1000g/best_gameplay.gif) |
+| ![Pendulum Training](results/pendulum_dm_flex_s45_1000g/training_plot.png) | <video src="results/pendulum_dm_flex_s45_1000g/best_gameplay.mp4" width="400"> |
 
 - **Pop:** 80 · **Gens:** 1000 · **Episodes:** 10 · **Seed:** 45
 - **Final architecture:** 3→32→32→1 (Tanh), 2 layers — evolved continuous output
@@ -73,9 +73,9 @@ All runs use the DualMixture mutator with flexible architecture and learned spec
 
 **Best: 808.9** — first vision-based environment. CNN policy processes raw pixels. Fleet-trained across 4 nodes.
 
-| | |
+| Training | Gameplay (with activations) |
 |---|---|
-| ![CarRacing Training](results/carracing_dm_s45_100g_fleet/CarRacing-v3_dualmixture_spec_s45.png) | *(gameplay capture pending)* |
+| ![CarRacing Training](results/carracing_dm_s45_100g_fleet/CarRacing-v3_dualmixture_spec_s45.png) | <video src="results/carracing_dm_s45_100g_fleet/best_gameplay.mp4" width="400"> |
 
 - **Pop:** 30 · **Gens:** 100 · **Episodes:** 3 · **Seed:** 45 · **Fleet:** 4 nodes
 - **Final architecture:** CNN — 3 conv layers (8→16→16→8 channels) + FC (288→32→3), 17,971 params
@@ -123,15 +123,14 @@ How the magnitude and distribution of mutations compare across all five environm
 
 ![Mutation Deltas](docs/plots/mutation_delta_all_envs.png)
 
-## Mutator Architectures
+## Mutator Architecture
 
-| Mutator | Description | Crossover Mode |
-|---------|-------------|----------------|
-| **Gaussian** | N(0, σ) noise (ES baseline) | Random per-weight interpolation + noise |
-| **Chunk MLP** | Processes weights in fixed-size chunks | Dedicated `cross_net` sees both parents' chunks |
-| **Transformer** | Self-attention over weight segments | Cross-attention embedding of both parents |
-| **Error Corrector** | Learned reference + targeted corrections | Encodes parent midpoint, corrects toward reference |
-| **DualMixture** | NN mutator + Gaussian escape hatch (configurable p) | NN-guided crossover with Gaussian fallback |
+The **DualMixtureCorrectorMutator** (8,374 params) is the sole mutator architecture. It processes policy weights in 64-element chunks through a learned encoder→corrector pipeline:
+
+1. **Encoder** (64→16): Compresses each weight chunk to a latent representation
+2. **Corrector** (48→64→64): Compares encoded chunk against a learned reference vector, outputs targeted weight deltas (clamped to ±0.1)
+3. **Gaussian escape** (~20%): With evolved probability, adds pure Gaussian noise to prevent fixed-point collapse
+4. **Dual-head**: Separate scales for policy weights (larger mutations) vs mutator self-weights (conservative)
 
 ## Usage
 
@@ -142,9 +141,9 @@ source .venv/bin/activate
 pip install torch gymnasium matplotlib numpy
 
 # Basic run
-python -m src.train --env CartPole-v1 --mutator gaussian --generations 100
+python -m src.train --env CartPole-v1 --generations 100
 
-# Full featured run with DualMixture
+# Full featured run
 python -m src.train \
     --env LunarLander-v3 \
     --mutator dualmixture \
