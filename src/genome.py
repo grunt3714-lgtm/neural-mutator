@@ -724,7 +724,7 @@ class Genome:
 
     # Asymmetric rates: mutator self-modifies slowly, compat evolves freely
     MUTATOR_SELF_RATE = 0.1
-    COMPAT_RATE = 1.0  # compat net mutates at full rate — speciation needs agility
+    COMPAT_RATE = 0.1  # compat net mutates slowly — prevents speciation fragmentation
     DEFAULT_STRUCTURAL_RATE = 0.05  # 5% base probability of structural mutation
 
     def __init__(self, policy, mutator: nn.Module,
@@ -895,8 +895,11 @@ class Genome:
         mutator_delta_norm = torch.norm(mutator_delta).item()
         
         if n_compat > 0:
-            compat_noise = torch.randn(n_compat) * 0.05 * decay
-            meta_delta_final = torch.cat([mutator_delta, compat_noise])
+            # Use mutator-generated delta for compat weights, scaled by COMPAT_RATE
+            compat_delta_raw = meta_delta[n_mutator:n_mutator + n_compat] if meta_delta.shape[0] > n_mutator else torch.zeros(n_compat)
+            compat_delta_raw = compat_delta_raw[:n_compat] if compat_delta_raw.shape[0] >= n_compat else torch.cat([compat_delta_raw, torch.zeros(n_compat - compat_delta_raw.shape[0])])
+            compat_delta = compat_delta_raw * decay * self.COMPAT_RATE
+            meta_delta_final = torch.cat([mutator_delta, compat_delta])
         else:
             meta_delta_final = mutator_delta
 
