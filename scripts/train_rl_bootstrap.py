@@ -38,7 +38,7 @@ import torch.nn as nn
 import gymnasium as gym
 
 from src.snake_env import ensure_snake_registered
-from src.genome import Policy, GaussianMutator, Genome
+from src.genome import Policy, DualMixtureCorrectorMutator, Genome
 
 
 def _load_discord_token_from_openclaw() -> str | None:
@@ -211,8 +211,8 @@ def export_ppo_to_genome(model, env_id: str, out_path: Path) -> None:
         tgt_l3.weight.copy_(sb3_out.weight)
         tgt_l3.bias.copy_(sb3_out.bias)
 
-    mutator = GaussianMutator()
-    genome = Genome(policy=policy, mutator=mutator, mutator_type='gaussian', compat_net=None)
+    mutator = DualMixtureCorrectorMutator()
+    genome = Genome(policy=policy, mutator=mutator, mutator_type='dualmixture', compat_net=None)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     genome.save(str(out_path))
 

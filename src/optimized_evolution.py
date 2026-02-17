@@ -13,24 +13,16 @@ import torch
 import numpy as np
 from typing import List, Dict
 from .evolution import evaluate_genome, assign_species
-from .genome import (Genome, Policy, ChunkMutator, TransformerMutator,
-                     GaussianMutator, ErrorCorrectorMutator)
+from .genome import (Genome, Policy, create_mutator)
 
 
-def create_optimized_population(pop_size, obs_dim, act_dim, mutator_type='chunk',
+def create_optimized_population(pop_size, obs_dim, act_dim, mutator_type='dualmixture',
                                  hidden=64, chunk_size=64) -> List[Genome]:
     """Create population with larger hidden layers for harder envs."""
     population = []
     for _ in range(pop_size):
         policy = Policy(obs_dim, act_dim, hidden)
-        if mutator_type == 'chunk':
-            mutator = ChunkMutator(chunk_size=chunk_size, hidden=256)  # bigger mutator
-        elif mutator_type == 'transformer':
-            mutator = TransformerMutator(chunk_size=chunk_size, d_model=128, n_layers=2)
-        elif mutator_type == 'gaussian':
-            mutator = GaussianMutator(mutation_scale=0.05)  # slightly larger initial scale
-        else:
-            mutator = GaussianMutator()
+        mutator = create_mutator(mutator_type, chunk_size=chunk_size)
         population.append(Genome(policy, mutator, mutator_type))
     return population
 
@@ -52,20 +44,13 @@ def detect_stagnation(history: Dict, window: int = 30) -> bool:
 
 def restart_worst(population: List[Genome], fraction: float = 0.2,
                   obs_dim: int = 8, act_dim: int = 4, hidden: int = 64,
-                  mutator_type: str = 'chunk', chunk_size: int = 64):
+                  mutator_type: str = 'dualmixture', chunk_size: int = 64):
     """Replace worst fraction of population with fresh random individuals."""
     n_replace = max(1, int(len(population) * fraction))
     ranked = sorted(population, key=lambda g: g.fitness)
     for i in range(n_replace):
         policy = Policy(obs_dim, act_dim, hidden)
-        if mutator_type == 'chunk':
-            mutator = ChunkMutator(chunk_size=chunk_size, hidden=256)
-        elif mutator_type == 'transformer':
-            mutator = TransformerMutator(chunk_size=chunk_size)
-        elif mutator_type == 'gaussian':
-            mutator = GaussianMutator(mutation_scale=0.05)
-        else:
-            mutator = GaussianMutator()
+        mutator = create_mutator(mutator_type, chunk_size=chunk_size)
         ranked[i] = Genome(policy, mutator, mutator_type)
     return ranked
 
@@ -127,7 +112,7 @@ def evolve_generation_optimized(population: List[Genome], crossover_rate: float 
 
 
 def run_optimized_evolution(env_id='LunarLander-v3', pop_size=80, generations=500,
-                            mutator_type='chunk', n_eval_episodes=10,
+                            mutator_type='dualmixture', n_eval_episodes=10,
                             crossover_rate=0.3, hidden=128, chunk_size=64,
                             seed=42) -> Dict:
     """Optimized evolution loop for harder environments."""

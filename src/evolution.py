@@ -136,7 +136,7 @@ def evaluate_population(population: List[Genome], env_id: str,
 
 
 def create_population(pop_size: int, obs_dim: int, act_dim: int,
-                      mutator_type: str = 'chunk', hidden: int = 64,
+                      mutator_type: str = 'dualmixture', hidden: int = 64,
                       chunk_size: int = 64,
                       speciation: bool = False,
                       flex: bool = False,
@@ -288,7 +288,7 @@ def evolve_generation(population: List[Genome], crossover_rate: float = 0.3,
 
 def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
 
-                  generations: int = 100, mutator_type: str = 'chunk',
+                  generations: int = 100, mutator_type: str = 'dualmixture',
                   n_eval_episodes: int = 5, crossover_rate: float = 0.3,
                   hidden: int = 64, chunk_size: int = 64,
                   log_interval: int = 1, seed: int = 42,

@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.genome import (
     FlexiblePolicy, Policy, StructuralMutation, Genome,
-    ChunkMutator, GaussianMutator, MIN_NEURONS, MAX_NEURONS, MIN_LAYERS, MAX_LAYERS
+    DualMixtureCorrectorMutator, MIN_NEURONS, MAX_NEURONS, MIN_LAYERS, MAX_LAYERS
 )
 
 
@@ -140,27 +140,27 @@ class TestVariableLengthGenomeSerialization:
 
     def test_flexible_genome_flat_roundtrip(self):
         policy = FlexiblePolicy(4, 2, [32, 16])
-        mutator = ChunkMutator(chunk_size=64)
-        g = Genome(policy, mutator, 'chunk')
+        mutator = DualMixtureCorrectorMutator()
+        g = Genome(policy, mutator, 'dualmixture')
         flat = g.get_flat_weights()
         
         # Clone and restore
         policy2 = FlexiblePolicy(4, 2, [32, 16])
-        mutator2 = ChunkMutator(chunk_size=64)
-        g2 = Genome(policy2, mutator2, 'chunk')
+        mutator2 = DualMixtureCorrectorMutator()
+        g2 = Genome(policy2, mutator2, 'dualmixture')
         g2.set_flat_weights(flat)
         
         flat2 = g2.get_flat_weights()
         assert torch.allclose(flat, flat2)
 
     def test_different_architectures_different_sizes(self):
-        g1 = Genome(FlexiblePolicy(4, 2, [32]), ChunkMutator(), 'chunk')
-        g2 = Genome(FlexiblePolicy(4, 2, [64, 64]), ChunkMutator(), 'chunk')
+        g1 = Genome(FlexiblePolicy(4, 2, [32]), DualMixtureCorrectorMutator(), 'dualmixture')
+        g2 = Genome(FlexiblePolicy(4, 2, [64, 64]), DualMixtureCorrectorMutator(), 'dualmixture')
         assert g1.num_policy_params() != g2.num_policy_params()
 
     def test_is_flexible(self):
-        g1 = Genome(FlexiblePolicy(4, 2, [32]), ChunkMutator(), 'chunk')
-        g2 = Genome(Policy(4, 2, 64), ChunkMutator(), 'chunk')
+        g1 = Genome(FlexiblePolicy(4, 2, [32]), DualMixtureCorrectorMutator(), 'dualmixture')
+        g2 = Genome(Policy(4, 2, 64), DualMixtureCorrectorMutator(), 'dualmixture')
         assert g1.is_flexible
         assert not g2.is_flexible
 
@@ -169,8 +169,8 @@ class TestCrossoverDifferentArchitectures:
     """Test crossover between genomes with different architectures."""
 
     def test_crossover_same_arch(self):
-        g1 = Genome(FlexiblePolicy(4, 2, [32, 32]), ChunkMutator(), 'chunk')
-        g2 = Genome(FlexiblePolicy(4, 2, [32, 32]), ChunkMutator(), 'chunk')
+        g1 = Genome(FlexiblePolicy(4, 2, [32, 32]), DualMixtureCorrectorMutator(), 'dualmixture')
+        g2 = Genome(FlexiblePolicy(4, 2, [32, 32]), DualMixtureCorrectorMutator(), 'dualmixture')
         g1.fitness = 10.0
         g2.fitness = 5.0
         child = g1.crossover(g2)
@@ -178,8 +178,8 @@ class TestCrossoverDifferentArchitectures:
         assert child.policy.layer_sizes == [32, 32]
 
     def test_crossover_different_arch(self):
-        g1 = Genome(FlexiblePolicy(4, 2, [64, 64]), ChunkMutator(), 'chunk')
-        g2 = Genome(FlexiblePolicy(4, 2, [32]), ChunkMutator(), 'chunk')
+        g1 = Genome(FlexiblePolicy(4, 2, [64, 64]), DualMixtureCorrectorMutator(), 'dualmixture')
+        g2 = Genome(FlexiblePolicy(4, 2, [32]), DualMixtureCorrectorMutator(), 'dualmixture')
         g1.fitness = 10.0
         g2.fitness = 5.0
         # g1 is fitter, so child should have g1's architecture
@@ -187,8 +187,8 @@ class TestCrossoverDifferentArchitectures:
         assert child.policy.layer_sizes == [64, 64]
 
     def test_crossover_fixed_still_works(self):
-        g1 = Genome(Policy(4, 2, 64), ChunkMutator(), 'chunk')
-        g2 = Genome(Policy(4, 2, 64), ChunkMutator(), 'chunk')
+        g1 = Genome(Policy(4, 2, 64), DualMixtureCorrectorMutator(), 'dualmixture')
+        g2 = Genome(Policy(4, 2, 64), DualMixtureCorrectorMutator(), 'dualmixture')
         child = g1.crossover(g2)
         assert not child.is_flexible
 
@@ -198,7 +198,7 @@ class TestReproduceWithStructuralMutation:
 
     def test_reproduce_no_structural(self):
         """With structural_rate=0, no structural mutation should occur."""
-        g = Genome(FlexiblePolicy(4, 2, [32, 32]), ChunkMutator(), 'chunk')
+        g = Genome(FlexiblePolicy(4, 2, [32, 32]), DualMixtureCorrectorMutator(), 'dualmixture')
         g.structural_rate = 0.0
         child = g.reproduce()
         assert child.policy.layer_sizes == [32, 32]
@@ -208,21 +208,21 @@ class TestReproduceWithStructuralMutation:
         """With structural_rate=1.0, structural mutation should always occur."""
         np.random.seed(42)
         torch.manual_seed(42)
-        g = Genome(FlexiblePolicy(4, 2, [32, 32]), GaussianMutator(), 'gaussian')
+        g = Genome(FlexiblePolicy(4, 2, [32, 32]), DualMixtureCorrectorMutator(), 'dualmixture')
         g.structural_rate = 1.0
         child = g.reproduce()
         assert child.last_structural_mutation is not None
 
     def test_reproduce_preserves_fixed_policy(self):
         """Fixed policy genomes should never get structural mutations."""
-        g = Genome(Policy(4, 2, 64), ChunkMutator(), 'chunk')
+        g = Genome(Policy(4, 2, 64), DualMixtureCorrectorMutator(), 'dualmixture')
         child = g.reproduce()
         assert not child.is_flexible
 
     def test_structural_rate_evolves(self):
         """Structural rate should change slightly in offspring."""
         np.random.seed(42)
-        g = Genome(FlexiblePolicy(4, 2, [32, 32]), GaussianMutator(), 'gaussian')
+        g = Genome(FlexiblePolicy(4, 2, [32, 32]), DualMixtureCorrectorMutator(), 'dualmixture')
         g.structural_rate = 1.0  # force structural mutation
         child = g.reproduce()
         # Rate should have changed (log-normal walk)
@@ -232,7 +232,7 @@ class TestReproduceWithStructuralMutation:
     def test_child_functional_after_structural(self):
         """Child should produce valid actions after structural mutation."""
         np.random.seed(42)
-        g = Genome(FlexiblePolicy(4, 2, [32, 32]), GaussianMutator(), 'gaussian')
+        g = Genome(FlexiblePolicy(4, 2, [32, 32]), DualMixtureCorrectorMutator(), 'dualmixture')
         g.structural_rate = 1.0
         child = g.reproduce()
         obs = np.random.randn(4).astype(np.float32)

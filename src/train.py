@@ -34,7 +34,7 @@ def _load_discord_token_from_openclaw() -> str | None:
 def main():
     parser = argparse.ArgumentParser(description='Neural Mutator Evolution')
     parser.add_argument('--env', default='CartPole-v1', help='Gymnasium environment')
-    parser.add_argument('--mutator', default='chunk',
+    parser.add_argument('--mutator', default='dualmixture',
                         choices=available_mutator_types(),
                         help='Mutator architecture')
     parser.add_argument('--pop-size', type=int, default=30, help='Population size')

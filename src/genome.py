@@ -426,179 +426,6 @@ class FlexiblePolicy(nn.Module):
         return False
 
 
-class GaussianMutator(nn.Module):
-    """Baseline: simple Gaussian noise mutation (ES-style)."""
-
-    def __init__(self, mutation_scale: float = 0.02):
-        super().__init__()
-        self.base_scale = mutation_scale
-        self.dummy = nn.Parameter(torch.tensor(0.0), requires_grad=False)
-
-    def mutate_genome(self, flat_weights: torch.Tensor,
-                      weight_coords: torch.Tensor = None,
-                      other_weights: torch.Tensor = None) -> torch.Tensor:
-        if other_weights is not None:
-            # Crossover mode: random interpolation per weight + noise
-            alpha = torch.rand_like(flat_weights)
-            blended = alpha * flat_weights + (1 - alpha) * other_weights
-            noise = torch.randn_like(blended) * self.base_scale
-            return blended + noise
-        noise = torch.randn_like(flat_weights) * self.base_scale
-        return flat_weights + noise
-
-
-class ChunkMutator(nn.Module):
-    """Chunk-based MLP mutator with learned crossover."""
-
-    def __init__(self, chunk_size: int = 64, hidden: int = 128):
-        super().__init__()
-        self.chunk_size = chunk_size
-        # Single-parent mutation network
-        self.net = nn.Sequential(
-            nn.Linear(chunk_size, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, chunk_size),
-            nn.Tanh(),
-        )
-        # Dual-parent crossover network: sees both parents' chunks
-        self.cross_net = nn.Sequential(
-            nn.Linear(chunk_size * 2, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, chunk_size),
-            nn.Tanh(),
-        )
-        self.mutation_scale = nn.Parameter(torch.tensor(0.01))
-
-    def mutate_genome(self, flat_weights: torch.Tensor,
-                      weight_coords: torch.Tensor = None,
-                      other_weights: torch.Tensor = None) -> torch.Tensor:
-        n = flat_weights.shape[0]
-        cs = self.chunk_size
-        pad_len = (cs - n % cs) % cs
-        padded = torch.cat([flat_weights, torch.zeros(pad_len)])
-
-        if other_weights is not None:
-            # Crossover mode: feed both parents into cross_net
-            other_pad = torch.cat([other_weights, torch.zeros(max(0, padded.shape[0] - other_weights.shape[0]))])
-            other_pad = other_pad[:padded.shape[0]]
-            chunks_a = padded.view(-1, cs)
-            chunks_b = other_pad.view(-1, cs)
-            combined = torch.cat([chunks_a, chunks_b], dim=1)  # [n_chunks, cs*2]
-            delta = self.cross_net(combined) * self.mutation_scale
-            delta = torch.clamp(delta, -0.1, 0.1)
-            # Start from midpoint of parents
-            base = (chunks_a + chunks_b) / 2
-            mutated = base + delta
-            return mutated.view(-1)[:n]
-
-        chunks = padded.view(-1, cs)
-        delta = self.net(chunks) * self.mutation_scale
-        delta = torch.clamp(delta, -0.1, 0.1)
-        mutated = chunks + delta
-        return mutated.view(-1)[:n]
-
-
-class ErrorCorrectorMutator(nn.Module):
-    """
-    Learned error-correction mutator.
-    
-    Instead of blind transformation, this mutator maintains a learned "reference"
-    for what good weights look like. It compares the current genome to the reference
-    and outputs targeted corrections — pushing weights toward the learned ideal.
-    
-    Architecture:
-    - Reference: a learned parameter vector (compressed genome representation)
-    - Encoder: compresses current weights to same space as reference
-    - Corrector: takes (current_encoding, reference, difference) → correction delta
-    
-    If weights drift due to bad crossover or mutation, the corrector steers them back.
-    Evolution selects for mutators whose reference leads to high fitness.
-    """
-
-    def __init__(self, chunk_size: int = 64, ref_dim: int = 16, hidden: int = 64):
-        super().__init__()
-        self.chunk_size = chunk_size
-        self.ref_dim = ref_dim
-        
-        # Learned reference: the mutator's internal "ideal" (evolved, not trained)
-        self.reference = nn.Parameter(torch.randn(ref_dim) * 0.1)
-        
-        # Encoder: compress each chunk to reference space
-        self.encoder = nn.Sequential(
-            nn.Linear(chunk_size, ref_dim),
-            nn.Tanh(),
-        )
-        
-        # Corrector: takes current encoding + reference + diff → correction
-        self.corrector = nn.Sequential(
-            nn.Linear(ref_dim * 3, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, chunk_size),
-            nn.Tanh(),
-        )
-        
-        # Learned correction scale
-        self.correction_scale = nn.Parameter(torch.tensor(0.02))
-        
-        # Exploration noise scale
-        self.explore_scale = nn.Parameter(torch.tensor(0.005))
-
-    def mutate_genome(self, flat_weights: torch.Tensor,
-                      weight_coords: torch.Tensor = None,
-                      other_weights: torch.Tensor = None) -> torch.Tensor:
-        n = flat_weights.shape[0]
-        cs = self.chunk_size
-        pad_len = (cs - n % cs) % cs
-        padded = torch.cat([flat_weights, torch.zeros(pad_len)])
-        
-        if other_weights is not None:
-            # Crossover: encode both parents, use corrector to blend toward reference
-            other_pad = torch.cat([other_weights, torch.zeros(max(0, padded.shape[0] - other_weights.shape[0]))])
-            other_pad = other_pad[:padded.shape[0]]
-            chunks_a = padded.view(-1, cs)
-            chunks_b = other_pad.view(-1, cs)
-            base = (chunks_a + chunks_b) / 2
-            encoded = self.encoder(base)
-            num_chunks = encoded.shape[0]
-            ref = self.reference.unsqueeze(0).expand(num_chunks, -1)
-            diff = encoded - ref
-            corrector_input = torch.cat([encoded, ref, diff], dim=1)
-            correction = self.corrector(corrector_input) * self.correction_scale
-            correction = torch.clamp(correction, -0.1, 0.1)
-            noise = torch.randn_like(base) * self.explore_scale
-            mutated = base + correction + noise
-            return mutated.view(-1)[:n]
-
-        chunks = padded.view(-1, cs)
-        num_chunks = chunks.shape[0]
-        
-        # Encode each chunk
-        encoded = self.encoder(chunks)  # (num_chunks, ref_dim)
-        
-        # Broadcast reference to all chunks
-        ref = self.reference.unsqueeze(0).expand(num_chunks, -1)
-        
-        # Compute difference: how far is each chunk from the "ideal"?
-        diff = encoded - ref
-        
-        # Corrector input: current state + ideal + error signal
-        corrector_input = torch.cat([encoded, ref, diff], dim=1)
-        
-        # Compute targeted correction
-        correction = self.corrector(corrector_input) * self.correction_scale
-        correction = torch.clamp(correction, -0.1, 0.1)
-        
-        # Add small exploration noise (prevents collapse to pure fixed point)
-        noise = torch.randn_like(chunks) * self.explore_scale
-        
-        mutated = chunks + correction + noise
-        return mutated.view(-1)[:n]
-
-
 class DualHeadCorrectorMutator(nn.Module):
     """Two-head corrector mutator: separate correction/exploration for policy vs meta (mutator+compat).
 
@@ -732,67 +559,13 @@ class DualMixtureCorrectorMutator(DualHeadCorrectorMutator):
         return mutated
 
 
-class TransformerMutator(nn.Module):
-    """Transformer-based mutator with learned crossover via cross-attention."""
-
-    def __init__(self, chunk_size: int = 64, n_heads: int = 4, n_layers: int = 2,
-                 d_model: int = 128):
-        super().__init__()
-        self.chunk_size = chunk_size
-        self.d_model = d_model
-        self.embed = nn.Linear(chunk_size, d_model)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, nhead=n_heads, dim_feedforward=d_model * 2,
-            dropout=0.0, batch_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-        self.project = nn.Linear(d_model, chunk_size)
-        self.mutation_scale = nn.Parameter(torch.tensor(0.01))
-        # Cross-attention for dual-parent crossover
-        self.cross_embed = nn.Linear(chunk_size * 2, d_model)
-
-    def mutate_genome(self, flat_weights: torch.Tensor,
-                      weight_coords: torch.Tensor = None,
-                      other_weights: torch.Tensor = None) -> torch.Tensor:
-        n = flat_weights.shape[0]
-        cs = self.chunk_size
-        pad_len = (cs - n % cs) % cs
-        padded = torch.cat([flat_weights, torch.zeros(pad_len)])
-
-        if other_weights is not None:
-            # Crossover mode: interleave both parents' chunks as transformer input
-            other_pad = torch.cat([other_weights, torch.zeros(max(0, padded.shape[0] - other_weights.shape[0]))])
-            other_pad = other_pad[:padded.shape[0]]
-            chunks_a = padded.view(-1, cs)
-            chunks_b = other_pad.view(-1, cs)
-            # Concatenate per-chunk and embed
-            combined = torch.cat([chunks_a, chunks_b], dim=1)  # [n_chunks, cs*2]
-            embedded = self.cross_embed(combined).unsqueeze(0)  # [1, n_chunks, d_model]
-            transformed = self.transformer(embedded)
-            delta = self.project(transformed) * self.mutation_scale
-            delta = torch.clamp(delta, -0.1, 0.1)
-            base = ((chunks_a + chunks_b) / 2).unsqueeze(0)
-            mutated = (base + delta).view(-1)[:n]
-            return mutated
-
-        chunks = padded.view(1, -1, cs)
-        embedded = self.embed(chunks)
-        transformed = self.transformer(embedded)
-        delta = self.project(transformed) * self.mutation_scale
-        delta = torch.clamp(delta, -0.1, 0.1)
-
-        mutated = (chunks + delta).view(-1)[:n]
-        return mutated
-
-
 MUTATOR_REGISTRY = {
-    'gaussian': GaussianMutator,
-    'chunk': ChunkMutator,
-    'transformer': TransformerMutator,
-    'corrector': ErrorCorrectorMutator,
     'dualcorrector': DualHeadCorrectorMutator,
     'dualmixture': DualMixtureCorrectorMutator,
 }
+
+# Legacy keys that map to dualmixture for backward compatibility
+_LEGACY_MUTATOR_KEYS = {'gaussian', 'chunk', 'transformer', 'corrector'}
 
 MUTATOR_CLASS_TO_KEY = {cls.__name__: key for key, cls in MUTATOR_REGISTRY.items()}
 
@@ -802,13 +575,15 @@ def available_mutator_types() -> list[str]:
 
 
 def create_mutator(mutator_type: str, **kwargs) -> nn.Module:
-    try:
-        mut_cls = MUTATOR_REGISTRY[mutator_type]
-    except KeyError as e:
-        raise ValueError(f"Unknown mutator type: {mutator_type}") from e
+    # Map legacy mutator types to dualmixture
+    if mutator_type in _LEGACY_MUTATOR_KEYS:
+        mutator_type = 'dualmixture'
 
-    if mutator_type == 'gaussian':
-        return mut_cls()
+    if mutator_type not in MUTATOR_REGISTRY:
+        raise ValueError(f"Unknown mutator type: {mutator_type}. "
+                         f"Available: {list(MUTATOR_REGISTRY.keys())}")
+
+    mut_cls = MUTATOR_REGISTRY[mutator_type]
 
     if mutator_type == 'dualmixture':
         ctor = {}
@@ -953,7 +728,7 @@ class Genome:
     DEFAULT_STRUCTURAL_RATE = 0.05  # 5% base probability of structural mutation
 
     def __init__(self, policy, mutator: nn.Module,
-                 mutator_type: str = 'chunk',
+                 mutator_type: str = 'dualmixture',
                  compat_net: 'CompatibilityNet | None' = None):
         self.policy = policy
         self.mutator = mutator
@@ -1302,10 +1077,11 @@ class Genome:
             policy = Policy(obs_dim, act_dim, data.get('hidden', 64))
         policy.load_state_dict(data['policy_state'])
         # Reconstruct mutator from registry (supports legacy class-name saves)
-        saved_type = data.get('mutator_type', 'GaussianMutator')
+        saved_type = data.get('mutator_type', 'dualmixture')
         mutator_key = MUTATOR_CLASS_TO_KEY.get(saved_type, saved_type.lower())
         if mutator_key not in MUTATOR_REGISTRY:
-            mutator_key = 'gaussian'
+            # Legacy mutator type — fall back to dualmixture (cannot load old weights)
+            mutator_key = 'dualmixture'
         mutator = create_mutator(mutator_key)
         mutator.load_state_dict(data['mutator_state'])
         genome = Genome(policy, mutator, mutator_type=mutator_key)
