@@ -69,6 +69,21 @@ All runs use the DualMixture mutator with flexible architecture and learned spec
 - **Fidelity:** 0.00 → 0.23 over 1000 gens — mutator never stopped improving self-replication
 - **Best test episode:** -10.01 (near-perfect upright balance)
 
+### CarRacing-v3
+
+**Best: 808.9** — first vision-based environment. CNN policy processes raw pixels. Fleet-trained across 4 nodes.
+
+| | |
+|---|---|
+| ![CarRacing Training](results/carracing_dm_s45_100g_fleet/CarRacing-v3_dualmixture_spec_s45.png) | *(gameplay capture pending)* |
+
+- **Pop:** 30 · **Gens:** 100 · **Episodes:** 3 · **Seed:** 45 · **Fleet:** 4 nodes
+- **Final architecture:** CNN — 3 conv layers (8→16→16→8 channels) + FC (288→32→3), 17,971 params
+- **Mutator:** 8,374 params (0.47× the policy — first time mutator is **smaller** than the policy it evolves)
+- **Training time:** ~13.2 hours
+- **Multi-seed eval:** seed 42 = 769, seed 7 = 242, seed 123 = 412 (avg ~474)
+- **Note:** Random track layouts each evaluation force genuine generalization — no memorization possible
+
 ### Summary
 
 | Environment | Best Reward | Architecture | Gens | Status |
@@ -77,6 +92,7 @@ All runs use the DualMixture mutator with flexible architecture and learned spec
 | LunarLander-v3 | **291** | 8→51→4, 1 layer | 300 | ✅ Solved |
 | Acrobot-v1 | **-64** | 6→64→64→3, 2 layers | 300 | ✅ Beat baseline |
 | Pendulum-v1 | **-112** | 3→32→32→1, 2 layers | 1000 | 📈 Improving |
+| CarRacing-v3 | **809** | CNN 3conv+FC, 17,971 params | 100 | 🏎️ First vision env |
 
 ### Cross-Environment Findings
 
@@ -84,8 +100,28 @@ The DualMixture mutator adapts its learned parameters per environment:
 
 - **p_gauss converges to ~20% across all environments** — this ratio appears to be a universal sweet spot
 - **Correction scales specialize**: CartPole (0.033) > Pendulum (0.028) > LunarLander (0.020) — harder problems demand finer precision
-- **The mutator is 12-22× larger than the policy** — the "how to improve" knowledge is far more complex than the solution itself
+- **Mutator-to-policy ratio varies dramatically**: 21.7× for CartPole (386-param policy) down to 0.47× for CarRacing (17,971-param policy) — larger policies contain enough structure that the mutator doesn't need to be bigger
 - **Flexible architecture works**: networks self-compress to minimal viable size (CartPole: 128→64, Pendulum: 128→48)
+
+## Mutator Analysis
+
+Visualizing what the mutator networks actually learn across environments.
+
+### Weight Distributions
+
+The mutator's learned weights reveal how each environment shapes the mutation strategy:
+
+| | |
+|---|---|
+| ![CartPole Weights](docs/plots/mutator_weights_cartpole_annotated.png) | ![Acrobot Weights](docs/plots/mutator_weights_acrobot_annotated.png) |
+| ![Pendulum Weights](docs/plots/mutator_weights_pendulum_annotated.png) | ![LunarLander Weights](docs/plots/mutator_weights_lunarlander_annotated.png) |
+| ![CarRacing Weights](docs/plots/mutator_weights_carracing_annotated.png) | |
+
+### Mutation Deltas Across Environments
+
+How the magnitude and distribution of mutations compare across all five environments:
+
+![Mutation Deltas](docs/plots/mutation_delta_all_envs.png)
 
 ## Mutator Architectures
 

@@ -11,7 +11,8 @@ Features:
 import os
 import time
 import torch
-from multiprocessing import Pool as _Pool
+import multiprocessing as _mp
+_Pool = _mp.Pool
 import numpy as np
 import gymnasium as gym
 from typing import List, Dict
@@ -70,13 +71,14 @@ def _eval_worker(args):
     return evaluate_genome(genome, env_id, n_episodes, max_steps)
 
 
-def _get_pool(n_workers: int) -> _Pool:
+def _get_pool(n_workers: int):
     """Get or create a persistent worker pool."""
     global _worker_pool, _worker_pool_size
     if _worker_pool is None or _worker_pool_size != n_workers:
         if _worker_pool is not None:
             _worker_pool.terminate()
-        _worker_pool = _Pool(n_workers)
+        ctx = _mp.get_context('spawn')  # 'spawn' avoids fork issues with pygame/OpenGL
+        _worker_pool = ctx.Pool(n_workers)
         _worker_pool_size = n_workers
     return _worker_pool
 
@@ -140,11 +142,15 @@ def create_population(pop_size: int, obs_dim: int, act_dim: int,
                       flex: bool = False,
                       policy_arch: str = 'mlp',
                       output_dir: str = None,
-                      mutator_kwargs: dict | None = None) -> List[Genome]:
+                      mutator_kwargs: dict | None = None,
+                      obs_shape: tuple | None = None) -> List[Genome]:
     """Create initial population. If speciation=True, each genome gets a CompatibilityNet."""
     population = []
     for _ in range(pop_size):
-        if policy_arch == 'cnn':
+        if policy_arch == 'cnn-large' and obs_shape is not None:
+            from .genome import PolicyCNNLarge
+            policy = PolicyCNNLarge(obs_shape, act_dim)
+        elif policy_arch == 'cnn':
             policy = PolicyCNN(obs_dim, act_dim)
         elif flex:
             # Random small architecture: 1-2 layers, 32-64 neurons each
@@ -308,19 +314,29 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
     ensure_snake_registered()
 
     env = gym.make(env_id)
-    obs_dim = env.observation_space.shape[0]
+    obs_shape = env.observation_space.shape  # full shape for image envs
+    if len(obs_shape) == 1:
+        obs_dim = obs_shape[0]
+    else:
+        obs_dim = int(np.prod(obs_shape))  # flattened for param counting
     if isinstance(env.action_space, gym.spaces.Discrete):
         act_dim = env.action_space.n
     else:
         act_dim = env.action_space.shape[0]
     env.close()
 
-    print(f"Environment: {env_id} (obs={obs_dim}, act={act_dim})")
+    # Auto-detect CNN for image environments
+    if len(obs_shape) == 3 and policy_arch == 'mlp':
+        policy_arch = 'cnn-large'
+        print(f"Auto-detected image environment, using cnn-large policy")
+
+    print(f"Environment: {env_id} (obs={obs_shape}, act={act_dim})")
 
     population = create_population(pop_size, obs_dim, act_dim, mutator_type,
                                    hidden, chunk_size, speciation=speciation,
                                    flex=flex, policy_arch=policy_arch, output_dir=output_dir,
-                                   mutator_kwargs=mutator_kwargs)
+                                   mutator_kwargs=mutator_kwargs,
+                                   obs_shape=obs_shape if len(obs_shape) == 3 else None)
     genome = population[0]
     print(f"Genome: {genome.num_policy_params()} policy params + "
           f"{genome.num_mutator_params()} mutator params + "

@@ -42,7 +42,7 @@ def main():
     parser.add_argument('--episodes', type=int, default=5, help='Eval episodes per genome')
     parser.add_argument('--crossover-rate', type=float, default=0.3, help='Crossover probability')
     parser.add_argument('--hidden', type=int, default=64, help='Policy hidden size')
-    parser.add_argument('--policy-arch', default='mlp', choices=['mlp', 'cnn'],
+    parser.add_argument('--policy-arch', default='mlp', choices=['mlp', 'cnn', 'cnn-large'],
                         help='Policy architecture (mlp or cnn)')
     parser.add_argument('--chunk-size', type=int, default=64, help='Mutator chunk size')
     parser.add_argument('--dualmix-p-gauss-policy', type=float, default=0.20,

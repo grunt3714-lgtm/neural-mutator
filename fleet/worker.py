@@ -11,7 +11,9 @@ import os
 import socket
 import sys
 import time
-from multiprocessing import Pool, set_start_method
+import multiprocessing as _mp
+from multiprocessing import set_start_method
+Pool = _mp.Pool
 from multiprocessing.managers import BaseManager
 
 
@@ -120,7 +122,11 @@ def run_worker(host: str, port: int, authkey: bytes, local_workers: int,
         print(f"[{name}] Connected, {local_workers} local workers")
 
         # Create local process pool for this manager session
-        pool = Pool(local_workers)
+        # For workers=1, skip pool overhead entirely (avoids fork/spawn issues)
+        pool = None
+        if local_workers > 1:
+            ctx = _mp.get_context('spawn')
+            pool = ctx.Pool(local_workers)
 
         try:
             while True:
@@ -156,7 +162,10 @@ def run_worker(host: str, port: int, authkey: bytes, local_workers: int,
                 indices = [idx for (idx, gb, env_id, n_ep, ms) in batch]
 
                 try:
-                    results = pool.map(_eval_one, eval_args)
+                    if pool is not None:
+                        results = pool.map(_eval_one, eval_args)
+                    else:
+                        results = [_eval_one(a) for a in eval_args]
                 except Exception as e:
                     print(f"[{name}] Eval error: {e}")
                     results = [(-999.0, 0)] * len(indices)

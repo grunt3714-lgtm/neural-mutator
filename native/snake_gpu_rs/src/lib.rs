@@ -651,12 +651,26 @@ impl SnakeGpuCore {
         self.rng_state = state.rng_state;
     }
 
-    fn pixels_u32_to_rgb(pixels: Vec<u32>) -> Vec<u8> {
+    fn pixels_u32_to_semantic(pixels: Vec<u32>) -> Vec<u8> {
+        // Semantic one-hot channels per cell: [empty, snake, food]
+        // Render palette mapping from shader:
+        // - empty: 0
+        // - snake body: rgb(0,255,0)
+        // - head: rgb(255,255,255) -> snake channel
+        // - food: rgb(255,0,0)
         let mut out = Vec::with_capacity(pixels.len() * 3);
         for p in pixels {
-            out.push((p & 0xFF) as u8);
-            out.push(((p >> 8) & 0xFF) as u8);
-            out.push(((p >> 16) & 0xFF) as u8);
+            let r = (p & 0xFF) as u8;
+            let g = ((p >> 8) & 0xFF) as u8;
+            let b = ((p >> 16) & 0xFF) as u8;
+            if r == 0 && g == 0 && b == 0 {
+                out.extend_from_slice(&[1, 0, 0]);
+            } else if r == 255 && g == 0 && b == 0 {
+                out.extend_from_slice(&[0, 0, 1]);
+            } else {
+                // snake body or head
+                out.extend_from_slice(&[0, 1, 0]);
+            }
         }
         out
     }
@@ -724,37 +738,41 @@ impl SnakeGpuCore {
     }
 
     fn render_flat(&self) -> Vec<u8> {
+        // Semantic one-hot channels per cell: [empty, snake, food]
         let n = self.grid_size * self.grid_size * 3;
         let mut out = vec![0u8; n];
 
         let idx = |r: usize, c: usize, ch: usize, g: usize| -> usize { (r * g + c) * 3 + ch };
         let g = self.grid_size;
 
-        for &(r, c) in &self.body[1..] {
+        // Mark all empty first
+        for r in 0..g {
+            for c in 0..g {
+                out[idx(r, c, 0, g)] = 1;
+            }
+        }
+
+        // Mark snake body + head
+        for &(r, c) in &self.body {
             if r >= 0 && c >= 0 {
                 let (ru, cu) = (r as usize, c as usize);
                 if ru < g && cu < g {
-                    out[idx(ru, cu, 1, g)] = 255;
+                    out[idx(ru, cu, 0, g)] = 0;
+                    out[idx(ru, cu, 1, g)] = 1;
+                    out[idx(ru, cu, 2, g)] = 0;
                 }
             }
         }
 
-        // Render all foods
+        // Mark foods
         for &(fr, fc) in &self.foods {
             if fr >= 0 && fc >= 0 {
                 let (ru, cu) = (fr as usize, fc as usize);
                 if ru < g && cu < g {
-                    out[idx(ru, cu, 0, g)] = 255;
+                    out[idx(ru, cu, 0, g)] = 0;
+                    out[idx(ru, cu, 1, g)] = 0;
+                    out[idx(ru, cu, 2, g)] = 1;
                 }
-            }
-        }
-
-        if self.head_r >= 0 && self.head_c >= 0 {
-            let (ru, cu) = (self.head_r as usize, self.head_c as usize);
-            if ru < g && cu < g {
-                out[idx(ru, cu, 0, g)] = 255;
-                out[idx(ru, cu, 1, g)] = 255;
-                out[idx(ru, cu, 2, g)] = 255;
             }
         }
 
@@ -822,7 +840,7 @@ impl SnakeGpuCore {
             let body = self.gpu_body_vec();
             gpu.write_state_and_body(&state, &body);
             if let Ok((_st, pixels, _body)) = gpu.run() {
-                return Self::pixels_u32_to_rgb(pixels);
+                return Self::pixels_u32_to_semantic(pixels);
             }
             self.execution_mode = "cpu".to_string();
             self.gpu = None;
@@ -844,7 +862,7 @@ impl SnakeGpuCore {
                     .map(|xy| (xy[0], xy[1]))
                     .collect();
                 return (
-                    Self::pixels_u32_to_rgb(pixels),
+                    Self::pixels_u32_to_semantic(pixels),
                     out_state.reward,
                     out_state.terminated != 0,
                     out_state.truncated != 0,
