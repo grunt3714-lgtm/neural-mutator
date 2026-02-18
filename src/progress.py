@@ -55,9 +55,9 @@ class ProgressFileSink(ProgressSink):
 
 
 class DiscordTqdmSink(ProgressSink):
-    """tqdm.contrib.discord-based progress sink."""
+    """tqdm.contrib.discord-based progress sink with optional genome-level bar."""
 
-    def __init__(self, total: int, token: str, channel_id: int):
+    def __init__(self, total: int, token: str, channel_id: int, pop_size: int = 0):
         from tqdm.contrib.discord import tqdm as tqdm_discord
         self._bar = tqdm_discord(
             total=total,
@@ -69,8 +69,33 @@ class DiscordTqdmSink(ProgressSink):
             miniters=1,
         )
         self._last = 0
+        self._pop_size = pop_size
+        self._genome_bar = None
+        self._token = token
+        self._channel_id = channel_id
+        if pop_size > 0:
+            self._genome_bar = tqdm_discord(
+                total=pop_size,
+                token=token,
+                channel_id=int(channel_id),
+                desc='🧬 Genomes',
+                unit='genome',
+                mininterval=5,
+                miniters=1,
+            )
+
+    def on_genome_progress(self, collected: int, total: int) -> None:
+        """Called per genome result during fleet collect."""
+        if self._genome_bar is not None:
+            delta = collected - self._genome_bar.n
+            if delta > 0:
+                self._genome_bar.update(delta)
 
     def on_progress(self, event: ProgressEvent) -> None:
+        # Reset genome bar for next gen
+        if self._genome_bar is not None:
+            self._genome_bar.reset()
+
         done = event.gen + 1
         delta = done - self._last
         if delta > 0:
@@ -83,6 +108,8 @@ class DiscordTqdmSink(ProgressSink):
             self._last = done
         if event.gen == event.total - 1:
             self._bar.close()
+            if self._genome_bar is not None:
+                self._genome_bar.close()
 
 
 class ProgressReporter:
@@ -98,3 +125,10 @@ class ProgressReporter:
                 sink.on_progress(event)
             except Exception as e:
                 print(f'[progress] sink error ({type(sink).__name__}): {e}')
+
+    def get_genome_callback(self):
+        """Return a callable(collected, total) for genome-level progress, or None."""
+        for sink in self.sinks:
+            if hasattr(sink, 'on_genome_progress'):
+                return sink.on_genome_progress
+        return None

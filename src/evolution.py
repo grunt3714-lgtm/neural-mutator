@@ -85,7 +85,8 @@ def _get_pool(n_workers: int):
 
 def evaluate_population(population: List[Genome], env_id: str,
                         n_episodes: int = 5, max_steps: int = 1000,
-                        n_workers: int = 1, fleet=None) -> tuple[List[float], Dict]:
+                        n_workers: int = 1, fleet=None,
+                        genome_callback=None) -> tuple[List[float], Dict]:
     """Evaluate all genomes, optionally in parallel or via fleet.
 
     Returns:
@@ -93,7 +94,8 @@ def evaluate_population(population: List[Genome], env_id: str,
     """
     if fleet is not None:
         genomes_bytes = [g.to_bytes() for g in population]
-        return fleet.evaluate_population(genomes_bytes, env_id, n_episodes, max_steps)
+        return fleet.evaluate_population(genomes_bytes, env_id, n_episodes, max_steps,
+                                         genome_callback=genome_callback)
 
     t0 = time.time()
 
@@ -433,9 +435,9 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
             drift = torch.norm(current_mutator - initial_mutator_weights[ref_idx]).item()
             drifts.append(drift)
 
-        if flex:
-            layers_list = [len(g.policy.layer_sizes) for g in population]
-            neurons_list = [sum(g.policy.layer_sizes) for g in population]
+        if flex and hasattr(population[0].policy, 'layer_sizes'):
+            layers_list = [len(g.policy.layer_sizes) for g in population if hasattr(g.policy, 'layer_sizes')]
+            neurons_list = [sum(g.policy.layer_sizes) for g in population if hasattr(g.policy, 'layer_sizes')]
             struct_muts = sum(1 for g in population if g.last_structural_mutation is not None)
             history['mean_layers'].append(float(np.mean(layers_list)))
             history['max_layers'].append(max(layers_list))
@@ -542,14 +544,17 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
         for gen in range(generations):
             gen_t0 = time.time()
 
+            genome_cb = progress_callback.get_genome_callback() if hasattr(progress_callback, 'get_genome_callback') and progress_callback is not None else None
+
             if gen == 0:
                 # First gen: synchronous (nothing to overlap with)
                 raw_fitnesses, eval_profile = evaluate_population(
-                    population, env_id, n_eval_episodes, n_workers=n_workers, fleet=fleet
+                    population, env_id, n_eval_episodes, n_workers=n_workers, fleet=fleet,
+                    genome_callback=genome_cb
                 )
             else:
                 # Collect results dispatched at end of previous iteration
-                raw_fitnesses, eval_profile = fleet.collect()
+                raw_fitnesses, eval_profile = fleet.collect(genome_callback=genome_cb)
 
             # Process results + evolve next generation
             population = _process_gen(gen, population, raw_fitnesses, eval_profile, gen_t0)

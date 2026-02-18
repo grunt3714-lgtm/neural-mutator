@@ -102,7 +102,8 @@ def main():
     if not args.no_discord_tqdm:
         token = os.getenv('TQDM_DISCORD_TOKEN') or _load_discord_token_from_openclaw()
         if token and args.discord_channel_id:
-            progress_sinks.append(DiscordTqdmSink(train_cfg.generations, token, args.discord_channel_id))
+            progress_sinks.append(DiscordTqdmSink(train_cfg.generations, token, args.discord_channel_id,
+                                                     pop_size=train_cfg.pop_size))
             print(f"Discord tqdm: enabled (channel {args.discord_channel_id})")
         else:
             print("Discord tqdm: disabled (missing token/channel)")

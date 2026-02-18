@@ -102,8 +102,11 @@ class FleetEvaluator:
         self._pending_dispatch_sec = dispatch_sec
         return {'dispatch_sec': dispatch_sec, 'n': n}
 
-    def collect(self) -> tuple:
+    def collect(self, genome_callback=None) -> tuple:
         """Block until all dispatched results arrive.
+
+        Args:
+            genome_callback: optional callable(collected, total) called per genome result
 
         Returns:
             (fitnesses, eval_profile)
@@ -125,6 +128,11 @@ class FleetEvaluator:
                     results[idx] = fitness
                     step_counts[idx] = int(steps)
                     collected += 1
+                    if genome_callback is not None:
+                        try:
+                            genome_callback(collected, n)
+                        except Exception:
+                            pass
             except Exception:
                 elapsed = time.time() - self._pending_t0
                 print(f"[fleet] Warning: timeout waiting for results "
@@ -151,14 +159,15 @@ class FleetEvaluator:
     # ── Synchronous convenience (backwards-compatible) ──────────────
 
     def evaluate_population(self, genomes_bytes: List[bytes], env_id: str,
-                            n_episodes: int = 5, max_steps: int = 1000):
+                            n_episodes: int = 5, max_steps: int = 1000,
+                            genome_callback=None):
         """Send genomes to workers, collect fitnesses. Blocks until all done.
 
         Returns:
             (fitnesses, eval_profile)
         """
         self.dispatch(genomes_bytes, env_id, n_episodes, max_steps)
-        return self.collect()
+        return self.collect(genome_callback=genome_callback)
 
     def shutdown(self):
         # Send poison pills
