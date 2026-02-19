@@ -159,6 +159,44 @@ fn policy_action(model: &CModule, obs: [f32; 8]) -> i64 {
     out.argmax(0, false).int64_value(&[])
 }
 
+#[pyfunction(signature = (mutator_path, flat, split_idx, seed=None))]
+fn mutator_mutate(
+    mutator_path: String,
+    flat: Vec<f32>,
+    split_idx: i64,
+    seed: Option<i64>,
+) -> PyResult<Vec<f32>> {
+    if let Some(s) = seed {
+        tch::manual_seed(s);
+    }
+    let model = CModule::load(mutator_path)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("load mutator failed: {e}")))?;
+    let _ng = no_grad_guard();
+    let w = Tensor::from_slice(&flat).to_kind(Kind::Float);
+    let s = Tensor::from(split_idx);
+    let out = model
+        .forward_ts(&[w, s])
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("mutator forward failed: {e}")))?;
+    let flat_out = out.reshape([-1]).to_kind(Kind::Float);
+    let n = flat_out.numel();
+    let mut v = vec![0f32; n];
+    flat_out.copy_data(&mut v, n);
+    Ok(v)
+}
+
+#[pyfunction]
+fn compat_score(compat_path: String, genome_a: Vec<f32>, genome_b: Vec<f32>) -> PyResult<f32> {
+    let model = CModule::load(compat_path)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("load compat failed: {e}")))?;
+    let _ng = no_grad_guard();
+    let a = Tensor::from_slice(&genome_a).to_kind(Kind::Float);
+    let b = Tensor::from_slice(&genome_b).to_kind(Kind::Float);
+    let out = model
+        .forward_ts(&[a, b])
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("compat forward failed: {e}")))?;
+    Ok(out.double_value(&[]) as f32)
+}
+
 #[pyfunction(signature = (model_path, episodes, max_steps, threads, seed, webhook=None, progress_every=None))]
 fn evaluate_model_threaded(
     model_path: String,
@@ -243,5 +281,7 @@ fn benchmark_thread_scaling(model_path: String, episodes: usize, max_steps: usiz
 fn lunar_torch_eval_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(evaluate_model_threaded, m)?)?;
     m.add_function(wrap_pyfunction!(benchmark_thread_scaling, m)?)?;
+    m.add_function(wrap_pyfunction!(mutator_mutate, m)?)?;
+    m.add_function(wrap_pyfunction!(compat_score, m)?)?;
     Ok(())
 }

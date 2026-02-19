@@ -9,6 +9,7 @@ This branch adds a proof-of-concept Rust evaluator using `tch-rs` (libtorch) and
 - Inference with grad disabled (`no_grad_guard`)
 - Parallel episode rollouts with configurable thread counts
 - Optional Discord progress pings from Rust (`webhook`, `progress_every`)
+- Rust bindings for mutator + compat TorchScript modules (`mutator_mutate`, `compat_score`)
 
 ## Files
 
