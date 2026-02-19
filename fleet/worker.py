@@ -68,6 +68,13 @@ def _eval_one(args):
     return float(np.mean(rewards)), int(total_steps)
 
 
+def _eval_one_indexed(args):
+    """Wrapper that passes index through for imap_unordered."""
+    idx, genome_bytes, env_id, n_episodes, max_steps = args
+    fit, steps = _eval_one((genome_bytes, env_id, n_episodes, max_steps))
+    return idx, fit, steps
+
+
 def _is_connection_error(exc: Exception) -> bool:
     text = f"{type(exc).__name__}: {exc}".lower()
     return any(k in text for k in [
@@ -158,30 +165,31 @@ def run_worker(host: str, port: int, authkey: bytes, local_workers: int,
                 if not batch:
                     continue
 
-                eval_args = [(gb, env_id, n_ep, ms) for (idx, gb, env_id, n_ep, ms) in batch]
-                indices = [idx for (idx, gb, env_id, n_ep, ms) in batch]
+                # Include index in args so imap_unordered can return it
+                indexed_args = [(idx, gb, env_id, n_ep, ms) for (idx, gb, env_id, n_ep, ms) in batch]
 
                 try:
                     if pool is not None:
-                        results = pool.map(_eval_one, eval_args)
+                        for idx, fit, steps in pool.imap_unordered(_eval_one_indexed, indexed_args):
+                            try:
+                                result_q.put((idx, fit, int(steps)))
+                            except Exception as e:
+                                if _is_connection_error(e):
+                                    print(f"[{name}] manager connection lost while sending result: {e}")
+                                    break
+                                raise
                     else:
-                        results = [_eval_one(a) for a in eval_args]
+                        for args in indexed_args:
+                            idx, fit, steps = _eval_one_indexed(args)
+                            try:
+                                result_q.put((idx, fit, int(steps)))
+                            except Exception as e:
+                                if _is_connection_error(e):
+                                    print(f"[{name}] manager connection lost while sending result: {e}")
+                                    break
+                                raise
                 except Exception as e:
                     print(f"[{name}] Eval error: {e}")
-                    results = [(-999.0, 0)] * len(indices)
-
-                for idx, payload in zip(indices, results):
-                    try:
-                        if isinstance(payload, tuple):
-                            fit, steps = payload
-                        else:
-                            fit, steps = payload, 0
-                        result_q.put((idx, fit, int(steps)))
-                    except Exception as e:
-                        if _is_connection_error(e):
-                            print(f"[{name}] manager connection lost while sending result: {e}")
-                            break
-                        raise
 
         except KeyboardInterrupt:
             return

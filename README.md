@@ -71,18 +71,21 @@ All runs use the DualMixture mutator with flexible architecture and learned spec
 
 ### CarRacing-v3
 
-**Best: 808.9** — first vision-based environment. CNN policy processes raw pixels. Fleet-trained across 4 nodes.
+**Best: 898.3** (3-episode average) — near the theoretical ceiling (~920-940). CNN policy processes raw 96×96 pixels. Fleet-trained with learned speciation and compatibility network.
 
 | Training | Gameplay (with activations) |
 |---|---|
-| ![CarRacing Training](results/carracing_dm_s45_100g_fleet/training_plot.png) | ![Gameplay](results/carracing_dm_s45_100g_fleet/best_gameplay.gif) |
+| ![CarRacing Training](results/carracing_compat_s45_100g/training_plot.png) | <video src="results/carracing_compat_s45_100g/best_gameplay.mp4" width="400"></video> |
 
-- **Pop:** 30 · **Gens:** 100 · **Episodes:** 3 · **Seed:** 45 · **Fleet:** 4 nodes
-- **Final architecture:** CNN — 3 conv layers (8→16→16→8 channels) + FC (288→32→3), 17,971 params
-- **Mutator:** 8,374 params (0.47× the policy — first time mutator is **smaller** than the policy it evolves)
-- **Training time:** ~13.2 hours
-- **Multi-seed eval:** seed 42 = 769, seed 7 = 242, seed 123 = 412 (avg ~474)
-- **Note:** Random track layouts each evaluation force genuine generalization — no memorization possible
+- **Pop:** 50 · **Gens:** 100 · **Episodes:** 3 · **Seed:** 45 · **Fleet:** 3 nodes (21 workers)
+- **Architecture:** CNN-Large — 4 conv layers (3→8→16→16→8) + FC (288→32→3), 17,971 params
+- **Mutator:** 8,374 params · **Compat net:** 3,153 params · **Total genome:** 29,498 params
+- **Training time:** ~7 hours
+- **Eval (seed 42):** 836.4 reward
+- **Population mean:** -68 → 362 over 100 gens — the entire population learned to drive, not just elites
+- **Note:** Random track layouts each episode force genuine generalization — no memorization possible
+
+Previous run without compat net: 808.9 (pop 30, 100 gens). The learned speciation run improved by **11%** with a larger population and compatibility-gated crossover.
 
 ### Summary
 
@@ -92,7 +95,7 @@ All runs use the DualMixture mutator with flexible architecture and learned spec
 | LunarLander-v3 | **291** | 8→51→4, 1 layer | 300 | ✅ Solved |
 | Acrobot-v1 | **-64** | 6→64→64→3, 2 layers | 300 | ✅ Beat baseline |
 | Pendulum-v1 | **-112** | 3→32→32→1, 2 layers | 1000 | 📈 Improving |
-| CarRacing-v3 | **809** | CNN 3conv+FC, 17,971 params | 100 | 🏎️ First vision env |
+| CarRacing-v3 | **898** | CNN 4conv+FC, 17,971 params | 100 | 🏎️ Near-ceiling |
 
 ### Cross-Environment Findings
 
@@ -140,6 +143,28 @@ Running each environment's best mutator on its own best genome 10 times reveals 
 - **64-element chunk boundaries** create subtle periodic shifts in mutation magnitude
 - **CarRacing** is the most dramatic: the mutator learned to focus on conv layers and leave the large FC layer (9,216 params) nearly untouched — the feature extractors matter more than the action mapper
 - **Acrobot** shows near-zero deltas everywhere — the corrector failed to learn useful mutations, falling back on the 20% Gaussian noise for all progress
+
+### Learned Mutator vs Random Noise
+
+A key question: does the mutator learn structured mutations, or is it just fancy Gaussian noise? We ran each environment's best mutator 20 times on its own best genome and compared the resulting weight deltas to matched random Gaussian noise.
+
+![Mutator vs Random](results/mutator_vs_random.png)
+
+| Environment | Mutator Correlation | Random Correlation | Selectivity | Sparsity |
+|---|---|---|---|---|
+| CartPole | 0.039 | -0.003 | 13× | 14.9% |
+| Acrobot | **0.093** | -0.001 | **104×** | **52.6%** |
+| Pendulum | 0.044 | -0.004 | 19× | 10.5% |
+| LunarLander | **0.194** | 0.003 | 33× | 18.5% |
+| CarRacing | 0.101 | -0.000 | 9× | 16.4% |
+
+**Key findings:**
+- **Inter-mutation correlation** is consistently positive (0.04–0.19) vs ~0 for random noise — the mutator targets the same weight positions repeatedly
+- **Selectivity** (max/min mutation magnitude ratio) ranges from 9× to 104× — random would be ~2-3×. The mutator learned which weights matter
+- **Acrobot** is most dramatic: 52.6% of weights are left virtually untouched, with 104× selectivity — the mutator learned extreme surgical precision
+- **Distribution shape** shows heavier tails + sharper peak than Gaussian — precise small changes plus occasional large targeted jumps
+
+The high mutator drift (~9.5) means the mutator weights themselves evolved far from initialization — but what the mutator *produces* is clearly structured, not random.
 
 ## Mutator Architecture
 

@@ -87,9 +87,12 @@ class DiscordTqdmSink(ProgressSink):
     def on_genome_progress(self, collected: int, total: int) -> None:
         """Called per genome result during fleet collect."""
         if self._genome_bar is not None:
+            if self._genome_bar.total != total:
+                self._genome_bar.total = total
             delta = collected - self._genome_bar.n
             if delta > 0:
                 self._genome_bar.update(delta)
+                self._genome_bar.refresh()
 
     def on_progress(self, event: ProgressEvent) -> None:
         # Reset genome bar for next gen

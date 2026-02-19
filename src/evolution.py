@@ -94,8 +94,10 @@ def evaluate_population(population: List[Genome], env_id: str,
     """
     if fleet is not None:
         genomes_bytes = [g.to_bytes() for g in population]
-        return fleet.evaluate_population(genomes_bytes, env_id, n_episodes, max_steps,
-                                         genome_callback=genome_callback)
+        fleet.dispatch(genomes_bytes, env_id, n_episodes, max_steps)
+        del genomes_bytes  # free ~1.2GB before blocking on collect
+        import gc; gc.collect()
+        return fleet.collect(genome_callback=genome_callback)
 
     t0 = time.time()
 
@@ -435,7 +437,8 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
             drift = torch.norm(current_mutator - initial_mutator_weights[ref_idx]).item()
             drifts.append(drift)
 
-        if flex and hasattr(population[0].policy, 'layer_sizes'):
+        has_flex_layers = flex and hasattr(population[0].policy, 'layer_sizes')
+        if has_flex_layers:
             layers_list = [len(g.policy.layer_sizes) for g in population if hasattr(g.policy, 'layer_sizes')]
             neurons_list = [sum(g.policy.layer_sizes) for g in population if hasattr(g.policy, 'layer_sizes')]
             struct_muts = sum(1 for g in population if g.last_structural_mutation is not None)
@@ -460,7 +463,7 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
         if gen % log_interval == 0:
             msg = (f"Gen {gen:4d} | Best: {best_fit:8.2f} | Mean: {mean_fit:8.2f} | "
                    f"Fidelity: {np.mean(fidelities):.4f} | Drift: {np.mean(drifts):.4f}")
-            if flex:
+            if has_flex_layers:
                 msg += (f" | Layers: {np.mean(layers_list):.1f} "
                         f"| Neurons: {np.mean(neurons_list):.0f}")
             print(msg)

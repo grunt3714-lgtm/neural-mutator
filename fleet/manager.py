@@ -94,6 +94,8 @@ class FleetEvaluator:
         t0 = time.time()
         for i, gb in enumerate(genomes_bytes):
             self._work_queue.put((i, gb, env_id, n_episodes, max_steps))
+        # Don't hold references to genome bytes in the manager
+        genomes_bytes.clear()
         dispatch_sec = time.time() - t0
 
         # Store pending state
@@ -131,8 +133,8 @@ class FleetEvaluator:
                     if genome_callback is not None:
                         try:
                             genome_callback(collected, n)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            print(f"[fleet] genome_callback error: {e}")
             except Exception:
                 elapsed = time.time() - self._pending_t0
                 print(f"[fleet] Warning: timeout waiting for results "
