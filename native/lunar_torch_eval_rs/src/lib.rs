@@ -1,3 +1,5 @@
+use boxdd::{shapes, BodyBuilder, BodyType, ShapeDef, Vec2, World, WorldDef};
+use boxdd::types::BodyId;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -7,101 +9,141 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tch::{no_grad_guard, CModule, Kind, Tensor};
 
-#[derive(Clone)]
 struct CustomLunarLander {
-    x: f32,
-    y: f32,
-    vx: f32,
-    vy: f32,
-    theta: f32,
-    omega: f32,
-    left_contact: f32,
-    right_contact: f32,
+    world: World,
+    lander_id: BodyId,
     steps: usize,
     max_steps: usize,
+    left_contact: f32,
+    right_contact: f32,
 }
 
 impl CustomLunarLander {
     fn new(max_steps: usize) -> Self {
+        let wdef = WorldDef::builder().gravity(Vec2::new(0.0, -9.8)).build();
+        let mut world = World::new(wdef).expect("create world failed");
+
+        let ground = world.create_body_id(
+            BodyBuilder::new()
+                .body_type(BodyType::Static)
+                .position([0.0, -0.2])
+                .build(),
+        );
+        let sdef = ShapeDef::builder().build();
+        let ground_poly = shapes::box_polygon(2.0, 0.2);
+        world.create_polygon_shape_for(ground, &sdef, &ground_poly);
+
+        let lander_id = world.create_body_id(
+            BodyBuilder::new()
+                .body_type(BodyType::Dynamic)
+                .position([0.0, 1.0])
+                .linear_damping(0.1)
+                .angular_damping(0.1)
+                .build(),
+        );
+        let lander_poly = shapes::box_polygon(0.06, 0.09);
+        let sdef_lander = ShapeDef::builder().density(5.0).build();
+        world.create_polygon_shape_for(lander_id, &sdef_lander, &lander_poly);
+
         Self {
-            x: 0.0,
-            y: 1.0,
-            vx: 0.0,
-            vy: 0.0,
-            theta: 0.0,
-            omega: 0.0,
-            left_contact: 0.0,
-            right_contact: 0.0,
+            world,
+            lander_id,
             steps: 0,
             max_steps,
+            left_contact: 0.0,
+            right_contact: 0.0,
         }
     }
 
     fn reset(&mut self, rng: &mut StdRng) -> [f32; 8] {
-        self.x = rng.gen_range(-0.1..0.1);
-        self.y = 1.0 + rng.gen_range(-0.05..0.05);
-        self.vx = rng.gen_range(-0.02..0.02);
-        self.vy = rng.gen_range(-0.02..0.0);
-        self.theta = rng.gen_range(-0.05..0.05);
-        self.omega = 0.0;
+        let x = rng.gen_range(-0.1..0.1);
+        let y = 1.0 + rng.gen_range(-0.05..0.05);
+        let vx = rng.gen_range(-0.2..0.2);
+        let vy = rng.gen_range(-0.2..0.0);
+        let theta = rng.gen_range(-0.05..0.05);
+
+        {
+            let mut b = self.world.body(self.lander_id).expect("lander body missing");
+            b.set_position_and_rotation([x, y], theta);
+            b.set_linear_velocity([vx, vy]);
+            b.set_angular_velocity(0.0);
+        }
+
+        self.steps = 0;
         self.left_contact = 0.0;
         self.right_contact = 0.0;
-        self.steps = 0;
         self.obs()
     }
 
-    fn obs(&self) -> [f32; 8] {
-        [
-            self.x,
-            self.y,
-            self.vx,
-            self.vy,
-            self.theta,
-            self.omega,
-            self.left_contact,
-            self.right_contact,
-        ]
+    fn obs(&mut self) -> [f32; 8] {
+        let b = self.world.body(self.lander_id).expect("lander body missing");
+        let p = b.position();
+        let v = b.linear_velocity();
+        let w = b.angular_velocity();
+        let t = b.transform();
+        let theta = t.q.s.atan2(t.q.c);
+
+        // Approximate leg contacts by hull corners touching ground plane.
+        self.left_contact = if p.y - 0.09 <= 0.0 && p.x < 0.0 { 1.0 } else { 0.0 };
+        self.right_contact = if p.y - 0.09 <= 0.0 && p.x >= 0.0 { 1.0 } else { 0.0 };
+
+        [p.x, p.y, v.x, v.y, theta, w, self.left_contact, self.right_contact]
     }
 
     fn step(&mut self, action: i64) -> ([f32; 8], f32, bool) {
         // actions: 0=noop, 1=left thruster, 2=main thruster, 3=right thruster
-        let g = -0.0035_f32;
-        let main = if action == 2 { 0.0065 } else { 0.0 };
-        let side = if action == 1 { -0.0025 } else if action == 3 { 0.0025 } else { 0.0 };
+        let main = if action == 2 { 18.0 } else { 0.0 };
+        let side = if action == 1 { -6.0 } else if action == 3 { 6.0 } else { 0.0 };
 
-        self.vx += side;
-        self.vy += g + main;
-        self.omega += side * 0.25;
-        self.theta += self.omega;
-        self.x += self.vx;
-        self.y += self.vy;
+        {
+            let mut b = self.world.body(self.lander_id).expect("lander body missing");
+            if main != 0.0 {
+                b.apply_force_to_center([0.0, main], true);
+            }
+            if side != 0.0 {
+                b.apply_torque(side * 0.02, true);
+                b.apply_force_to_center([side, 0.0], true);
+            }
+        }
+
+        self.world.step(1.0 / 50.0, 8);
         self.steps += 1;
+
+        let obs = self.obs();
+        let x = obs[0];
+        let y = obs[1];
+        let vx = obs[2];
+        let vy = obs[3];
+        let theta = obs[4];
 
         let mut done = false;
         let mut reward = -0.03;
 
-        if self.y <= 0.0 {
-            self.y = 0.0;
-            let soft = self.vy.abs() < 0.06 && self.theta.abs() < 0.2 && self.x.abs() < 0.15;
-            self.left_contact = 1.0;
-            self.right_contact = 1.0;
+        if y <= 0.0 {
+            let soft = vy.abs() < 0.6 && theta.abs() < 0.2 && x.abs() < 0.15;
             done = true;
             reward += if soft { 120.0 } else { -100.0 };
         }
-
-        if self.x.abs() > 1.2 || self.steps >= self.max_steps {
+        if x.abs() > 1.2 || self.steps >= self.max_steps {
             done = true;
             reward -= 25.0;
         }
 
-        // shaping
-        reward += 1.2 * (1.0 - self.x.abs());
-        reward += 1.0 * (1.0 - self.y.min(1.0));
-        reward -= 0.2 * self.vx.abs();
-        reward -= 0.3 * self.vy.abs();
-        reward -= 0.2 * self.theta.abs();
+        // Gym-like shaping terms
+        reward += 1.2 * (1.0 - x.abs());
+        reward += 1.0 * (1.0 - y.min(1.0));
+        reward -= 0.2 * vx.abs();
+        reward -= 0.3 * vy.abs();
+        reward -= 0.2 * theta.abs();
+        reward += 0.1 * (self.left_contact + self.right_contact);
+        if action == 2 {
+            reward -= 0.30;
+        }
+        if action == 1 || action == 3 {
+            reward -= 0.03;
+        }
 
-        (self.obs(), reward, done)
+        (obs, reward, done)
     }
 }
 
