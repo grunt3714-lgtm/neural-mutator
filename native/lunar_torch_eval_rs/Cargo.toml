@@ -1,0 +1,14 @@
+[package]
+name = "lunar_torch_eval_rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "lunar_torch_eval_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+rand = "0.8"
+rayon = "1.10"
+tch = "0.18"
