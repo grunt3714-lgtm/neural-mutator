@@ -79,6 +79,8 @@ def main():
                         help='Path to TorchScript mutator for Rust inference hook')
     parser.add_argument('--rust-compat-ts', default=None,
                         help='Path to TorchScript compat net for Rust inference hook')
+    parser.add_argument('--rust-mutator-pair-ts', default=None,
+                        help='Path to TorchScript mutator pair module for Rust crossover hook')
     args = parser.parse_args()
     train_cfg, mut_cfg = build_configs(args)
 
@@ -90,6 +92,9 @@ def main():
     if args.rust_compat_ts:
         os.environ['NM_RUST_COMPAT_TS'] = args.rust_compat_ts
         print(f"Rust compat hook: {args.rust_compat_ts}")
+    if args.rust_mutator_pair_ts:
+        os.environ['NM_RUST_MUTATOR_PAIR_TS'] = args.rust_mutator_pair_ts
+        print(f"Rust mutator crossover hook: {args.rust_mutator_pair_ts}")
 
     print(f"{'='*60}")
     title = "Neural Mutator Evolution (True Self-Replication)"

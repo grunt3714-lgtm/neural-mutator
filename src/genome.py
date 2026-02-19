@@ -742,6 +742,10 @@ class Genome:
     def _rust_compat_path() -> str | None:
         return os.environ.get('NM_RUST_COMPAT_TS')
 
+    @staticmethod
+    def _rust_mutator_pair_path() -> str | None:
+        return os.environ.get('NM_RUST_MUTATOR_PAIR_TS')
+
     def __init__(self, policy, mutator: nn.Module,
                  mutator_type: str = 'dualmixture',
                  compat_net: 'CompatibilityNet | None' = None):
@@ -993,8 +997,24 @@ class Genome:
         decay = max(0.2, 1.0 - 0.8 * (generation / max(max_generations, 1)))
         
         # Let the fitter parent's mutator see both genomes and decide
-        # (Rust path currently supports single-parent mutate; crossover stays Python mutator)
-        mutated_full = self.mutator.mutate_genome(my_flat, weight_coords=torch.tensor([n_policy]), other_weights=other_flat)
+        rust_pair_path = self._rust_mutator_pair_path()
+        if _rust_eval is not None and rust_pair_path:
+            try:
+                out = _rust_eval.mutator_crossover(
+                    rust_pair_path,
+                    my_flat.detach().cpu().float().tolist(),
+                    other_flat.detach().cpu().float().tolist(),
+                    int(n_policy),
+                    None,
+                )
+                mutated_full = torch.tensor(out, dtype=my_flat.dtype)
+            except Exception as e:
+                if not Genome._RUST_WARNED:
+                    print(f"[rust] crossover fallback to python: {e}")
+                    Genome._RUST_WARNED = True
+                mutated_full = self.mutator.mutate_genome(my_flat, weight_coords=torch.tensor([n_policy]), other_weights=other_flat)
+        else:
+            mutated_full = self.mutator.mutate_genome(my_flat, weight_coords=torch.tensor([n_policy]), other_weights=other_flat)
         
         # Extract child weights from mutator output
         n_mutator = self.num_mutator_params()

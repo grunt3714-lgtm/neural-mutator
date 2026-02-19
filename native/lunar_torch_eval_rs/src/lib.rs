@@ -184,6 +184,33 @@ fn mutator_mutate(
     Ok(v)
 }
 
+#[pyfunction(signature = (mutator_pair_path, my_flat, other_flat, split_idx, seed=None))]
+fn mutator_crossover(
+    mutator_pair_path: String,
+    my_flat: Vec<f32>,
+    other_flat: Vec<f32>,
+    split_idx: i64,
+    seed: Option<i64>,
+) -> PyResult<Vec<f32>> {
+    if let Some(s) = seed {
+        tch::manual_seed(s);
+    }
+    let model = CModule::load(mutator_pair_path)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("load mutator pair failed: {e}")))?;
+    let _ng = no_grad_guard();
+    let a = Tensor::from_slice(&my_flat).to_kind(Kind::Float);
+    let b = Tensor::from_slice(&other_flat).to_kind(Kind::Float);
+    let s = Tensor::from(split_idx);
+    let out = model
+        .forward_ts(&[a, s, b])
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("mutator pair forward failed: {e}")))?;
+    let flat_out = out.reshape([-1]).to_kind(Kind::Float);
+    let n = flat_out.numel();
+    let mut v = vec![0f32; n];
+    flat_out.copy_data(&mut v, n);
+    Ok(v)
+}
+
 #[pyfunction]
 fn compat_score(compat_path: String, genome_a: Vec<f32>, genome_b: Vec<f32>) -> PyResult<f32> {
     let model = CModule::load(compat_path)
@@ -282,6 +309,7 @@ fn lunar_torch_eval_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()>
     m.add_function(wrap_pyfunction!(evaluate_model_threaded, m)?)?;
     m.add_function(wrap_pyfunction!(benchmark_thread_scaling, m)?)?;
     m.add_function(wrap_pyfunction!(mutator_mutate, m)?)?;
+    m.add_function(wrap_pyfunction!(mutator_crossover, m)?)?;
     m.add_function(wrap_pyfunction!(compat_score, m)?)?;
     Ok(())
 }

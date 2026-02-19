@@ -26,6 +26,16 @@ class MutatorWrapper(nn.Module):
         return self.mutator.mutate_genome(flat_weights, weight_coords=split)
 
 
+class MutatorPairWrapper(nn.Module):
+    def __init__(self, mutator: nn.Module):
+        super().__init__()
+        self.mutator = mutator
+
+    def forward(self, my_flat: torch.Tensor, split_idx: torch.Tensor, other_flat: torch.Tensor) -> torch.Tensor:
+        split = split_idx.to(dtype=torch.float32).reshape(1)
+        return self.mutator.mutate_genome(my_flat, weight_coords=split, other_weights=other_flat)
+
+
 class CompatWrapper(nn.Module):
     def __init__(self, compat: nn.Module):
         super().__init__()
@@ -52,7 +62,8 @@ def main() -> None:
     g.policy.eval(); g.mutator.eval(); g.compat_net.eval()
 
     # Policy
-    policy_ex = torch.zeros(1, g.obs_dim, dtype=torch.float32)
+    obs_dim = g.policy.obs_dim if hasattr(g.policy, 'obs_dim') else g.policy.net[0].in_features
+    policy_ex = torch.zeros(1, obs_dim, dtype=torch.float32)
     ts_policy = torch.jit.trace(g.policy, policy_ex)
     ts_policy.save(str(out / "policy.pt"))
 
@@ -60,8 +71,13 @@ def main() -> None:
     flat = g.get_flat_weights().detach().float()
     split = torch.tensor([g.num_policy_params()], dtype=torch.float32)
     mw = MutatorWrapper(g.mutator).eval()
-    ts_mut = torch.jit.trace(mw, (flat, split))
+    ts_mut = torch.jit.trace(mw, (flat, split), check_trace=False)
     ts_mut.save(str(out / "mutator.pt"))
+
+    # Mutator (crossover/pair path)
+    mpw = MutatorPairWrapper(g.mutator).eval()
+    ts_mut_pair = torch.jit.trace(mpw, (flat, split, flat.clone()), check_trace=False)
+    ts_mut_pair.save(str(out / "mutator_pair.pt"))
 
     # Compat
     cw = CompatWrapper(g.compat_net).eval()
