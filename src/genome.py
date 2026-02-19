@@ -9,6 +9,7 @@ Natural selection handles the rest — if a mutator destroys itself, it dies.
 """
 
 import io
+import os
 import torch
 import torch.nn as nn
 import numpy as np
@@ -16,6 +17,11 @@ from typing import Tuple, Optional, List
 import copy
 import random
 from enum import Enum
+
+try:
+    import lunar_torch_eval_rs as _rust_eval
+except Exception:
+    _rust_eval = None
 
 
 class StructuralMutation(str, Enum):
@@ -726,6 +732,15 @@ class Genome:
     MUTATOR_SELF_RATE = 0.1
     COMPAT_RATE = 0.1  # compat net mutates slowly — prevents speciation fragmentation
     DEFAULT_STRUCTURAL_RATE = 0.05  # 5% base probability of structural mutation
+    _RUST_WARNED = False
+
+    @staticmethod
+    def _rust_mutator_path() -> str | None:
+        return os.environ.get('NM_RUST_MUTATOR_TS')
+
+    @staticmethod
+    def _rust_compat_path() -> str | None:
+        return os.environ.get('NM_RUST_COMPAT_TS')
 
     def __init__(self, policy, mutator: nn.Module,
                  mutator_type: str = 'dualmixture',
@@ -801,10 +816,22 @@ class Genome:
             return self.compat_net.embed(self.get_flat_weights())
     
     def is_compatible(self, other: 'Genome', threshold: float = 0.5) -> bool:
-        """Check compatibility via L2 distance between species tags."""
+        """Check compatibility via learned tags; optionally use Rust compat scorer if configured."""
         if self.compat_net is None or other.compat_net is None:
             return True
-        
+
+        rust_path = self._rust_compat_path()
+        if _rust_eval is not None and rust_path:
+            try:
+                my_flat = self.get_flat_weights().detach().cpu().float().tolist()
+                other_flat = other.get_flat_weights().detach().cpu().float().tolist()
+                score = float(_rust_eval.compat_score(rust_path, my_flat, other_flat))
+                return score > threshold
+            except Exception as e:
+                if not Genome._RUST_WARNED:
+                    print(f"[rust] compat fallback to python: {e}")
+                    Genome._RUST_WARNED = True
+
         with torch.no_grad():
             my_tag = self.get_species_tag()
             other_tag = other.get_species_tag()
@@ -864,11 +891,30 @@ class Genome:
         # Extract policy size (split index for dual-head mutators)
         parent_n_policy = self.num_policy_params()
 
-        # Feed parent's full genome through parent's mutator
-        mutated_full = self.mutator.mutate_genome(
-            parent_full,
-            weight_coords=torch.tensor([parent_n_policy]),
-        )
+        # Feed parent's full genome through parent's mutator (optionally Rust TorchScript)
+        rust_mut_path = self._rust_mutator_path()
+        if _rust_eval is not None and rust_mut_path:
+            try:
+                out = _rust_eval.mutator_mutate(
+                    rust_mut_path,
+                    parent_full.detach().cpu().float().tolist(),
+                    int(parent_n_policy),
+                    None,
+                )
+                mutated_full = torch.tensor(out, dtype=parent_full.dtype)
+            except Exception as e:
+                if not Genome._RUST_WARNED:
+                    print(f"[rust] mutator fallback to python: {e}")
+                    Genome._RUST_WARNED = True
+                mutated_full = self.mutator.mutate_genome(
+                    parent_full,
+                    weight_coords=torch.tensor([parent_n_policy]),
+                )
+        else:
+            mutated_full = self.mutator.mutate_genome(
+                parent_full,
+                weight_coords=torch.tensor([parent_n_policy]),
+            )
         full_delta = mutated_full - parent_full
 
         # Extract policy delta — may need to resize if architecture changed
@@ -947,6 +993,7 @@ class Genome:
         decay = max(0.2, 1.0 - 0.8 * (generation / max(max_generations, 1)))
         
         # Let the fitter parent's mutator see both genomes and decide
+        # (Rust path currently supports single-parent mutate; crossover stays Python mutator)
         mutated_full = self.mutator.mutate_genome(my_flat, weight_coords=torch.tensor([n_policy]), other_weights=other_flat)
         
         # Extract child weights from mutator output

@@ -75,10 +75,21 @@ def main():
                         help='Discord channel for built-in tqdm progress (default: #training)')
     parser.add_argument('--no-discord-tqdm', action='store_true',
                         help='Disable built-in tqdm.contrib.discord progress updates')
+    parser.add_argument('--rust-mutator-ts', default=None,
+                        help='Path to TorchScript mutator for Rust inference hook')
+    parser.add_argument('--rust-compat-ts', default=None,
+                        help='Path to TorchScript compat net for Rust inference hook')
     args = parser.parse_args()
     train_cfg, mut_cfg = build_configs(args)
 
     os.makedirs(train_cfg.output, exist_ok=True)
+
+    if args.rust_mutator_ts:
+        os.environ['NM_RUST_MUTATOR_TS'] = args.rust_mutator_ts
+        print(f"Rust mutator hook: {args.rust_mutator_ts}")
+    if args.rust_compat_ts:
+        os.environ['NM_RUST_COMPAT_TS'] = args.rust_compat_ts
+        print(f"Rust compat hook: {args.rust_compat_ts}")
 
     print(f"{'='*60}")
     title = "Neural Mutator Evolution (True Self-Replication)"
