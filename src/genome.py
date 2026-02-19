@@ -55,6 +55,44 @@ class Policy(nn.Module):
         return action.numpy()
 
 
+class PolicyCNNSmall(nn.Module):
+    """Lightweight CNN for small grids (e.g. Snake 16x16x4). ~3k params."""
+
+    def __init__(self, obs_shape: tuple, act_dim: int):
+        super().__init__()
+        self.obs_shape = obs_shape  # (H, W, C)
+        self.obs_dim = int(np.prod(obs_shape))
+        self.act_dim = act_dim
+        h, w, c = obs_shape
+        self.conv = nn.Sequential(
+            nn.Conv2d(c, 8, kernel_size=3, stride=2, padding=1),   # 16->8
+            nn.ReLU(),
+            nn.Conv2d(8, 8, kernel_size=3, stride=2, padding=1),   # 8->4
+            nn.ReLU(),
+        )
+        conv_out = 8 * ((h + 1) // 4) * ((w + 1) // 4)  # 8*4*4=128 for 16x16
+        self.fc = nn.Sequential(
+            nn.Linear(conv_out, 16),
+            nn.Tanh(),
+            nn.Linear(16, act_dim),
+            nn.Tanh(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b = x.shape[0]
+        h, w, c = self.obs_shape
+        x = x.view(b, h, w, c).permute(0, 3, 1, 2).float() / 255.0
+        y = self.conv(x)
+        y = y.reshape(b, -1)
+        return self.fc(y)
+
+    def act(self, obs: np.ndarray) -> np.ndarray:
+        with torch.no_grad():
+            x = torch.FloatTensor(obs).unsqueeze(0)
+            action = self.forward(x).squeeze(0)
+        return action.numpy()
+
+
 class PolicyCNNLarge(nn.Module):
     """CNN policy for high-resolution image environments (e.g. CarRacing 96x96x3)."""
 
@@ -1013,6 +1051,8 @@ class Genome:
         if isinstance(self.policy, FlexiblePolicy):
             return FlexiblePolicy(self.policy.obs_dim, self.policy.act_dim,
                                   list(self.policy.layer_sizes))
+        if isinstance(self.policy, PolicyCNNSmall):
+            return PolicyCNNSmall(self.policy.obs_shape, self.policy.act_dim)
         if isinstance(self.policy, PolicyCNNLarge):
             return PolicyCNNLarge(self.policy.obs_shape, self.policy.act_dim)
         if isinstance(self.policy, PolicyCNN):
@@ -1048,6 +1088,10 @@ class Genome:
             data['policy_arch'] = 'flex'
             data['flex'] = True
             data['layer_sizes'] = list(self.policy.layer_sizes)
+        elif isinstance(self.policy, PolicyCNNSmall):
+            data['policy_arch'] = 'cnn-small'
+            data['flex'] = False
+            data['obs_shape'] = self.policy.obs_shape
         elif isinstance(self.policy, PolicyCNNLarge):
             data['policy_arch'] = 'cnn-large'
             data['flex'] = False
@@ -1071,7 +1115,9 @@ class Genome:
         data = torch.load(path, weights_only=False)
         obs_dim, act_dim = data['obs_dim'], data['act_dim']
         arch = data.get('policy_arch')
-        if arch == 'cnn-large':
+        if arch == 'cnn-small':
+            policy = PolicyCNNSmall(tuple(data['obs_shape']), act_dim)
+        elif arch == 'cnn-large':
             policy = PolicyCNNLarge(tuple(data['obs_shape']), act_dim)
         elif arch == 'cnn':
             policy = PolicyCNN(obs_dim, act_dim,

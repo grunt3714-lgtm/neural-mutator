@@ -42,7 +42,7 @@ def main():
     parser.add_argument('--episodes', type=int, default=5, help='Eval episodes per genome')
     parser.add_argument('--crossover-rate', type=float, default=0.3, help='Crossover probability')
     parser.add_argument('--hidden', type=int, default=64, help='Policy hidden size')
-    parser.add_argument('--policy-arch', default='mlp', choices=['mlp', 'cnn', 'cnn-large'],
+    parser.add_argument('--policy-arch', default='mlp', choices=['mlp', 'cnn', 'cnn-small', 'cnn-large'],
                         help='Policy architecture (mlp or cnn)')
     parser.add_argument('--chunk-size', type=int, default=64, help='Mutator chunk size')
     parser.add_argument('--dualmix-p-gauss-policy', type=float, default=0.20,
@@ -71,6 +71,8 @@ def main():
                         help='Minimum fleet workers to wait for before starting')
     parser.add_argument('--fleet-authkey', default='neuralfleet',
                         help='Fleet auth key')
+    parser.add_argument('--seed-genome', type=str, default=None,
+                        help='Path to genome .pt file to seed population from')
     parser.add_argument('--discord-channel-id', type=int, default=1471943945540866139,
                         help='Discord channel for built-in tqdm progress (default: #training)')
     parser.add_argument('--no-discord-tqdm', action='store_true',
@@ -145,6 +147,7 @@ def main():
             fleet=fleet,
             progress_callback=progress_callback,
             mutator_kwargs=mut_cfg.to_kwargs(),
+            seed_genome_path=args.seed_genome,
         )
     elapsed = time.time() - start
 

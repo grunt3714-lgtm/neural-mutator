@@ -27,6 +27,7 @@ from .genome import (
 )
 
 from .snake_env import ensure_snake_registered
+from .snake_shaped_env import ensure_snake_shaped_registered
 from .speciation import assign_species
 # Module-level pool for reuse across generations
 _worker_pool = None
@@ -41,6 +42,7 @@ def evaluate_genome(genome: Genome, env_id: str, n_episodes: int = 5,
         (mean_reward, env_steps)
     """
     ensure_snake_registered()
+    ensure_snake_shaped_registered()
     env = gym.make(env_id)
     rewards = []
     total_steps = 0
@@ -151,7 +153,10 @@ def create_population(pop_size: int, obs_dim: int, act_dim: int,
     """Create initial population. If speciation=True, each genome gets a CompatibilityNet."""
     population = []
     for _ in range(pop_size):
-        if policy_arch == 'cnn-large' and obs_shape is not None:
+        if policy_arch == 'cnn-small' and obs_shape is not None:
+            from .genome import PolicyCNNSmall
+            policy = PolicyCNNSmall(obs_shape, act_dim)
+        elif policy_arch == 'cnn-large' and obs_shape is not None:
             from .genome import PolicyCNNLarge
             policy = PolicyCNNLarge(obs_shape, act_dim)
         elif policy_arch == 'cnn':
@@ -305,7 +310,8 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
                   n_workers: int = 1,
                   fleet=None,
                   progress_callback=None,
-                  mutator_kwargs: dict | None = None) -> Dict:
+                  mutator_kwargs: dict | None = None,
+                  seed_genome_path: str | None = None) -> Dict:
     """
     Main evolution loop with true self-replication.
 
@@ -316,6 +322,7 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
     np.random.seed(seed)
     torch.manual_seed(seed)
     ensure_snake_registered()
+    ensure_snake_shaped_registered()
 
     env = gym.make(env_id)
     obs_shape = env.observation_space.shape  # full shape for image envs
@@ -331,8 +338,12 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
 
     # Auto-detect CNN for image environments
     if len(obs_shape) == 3 and policy_arch == 'mlp':
-        policy_arch = 'cnn-large'
-        print(f"Auto-detected image environment, using cnn-large policy")
+        if obs_shape[0] <= 32:
+            policy_arch = 'cnn-small'
+            print(f"Auto-detected small image environment ({obs_shape}), using cnn-small policy")
+        else:
+            policy_arch = 'cnn-large'
+            print(f"Auto-detected image environment, using cnn-large policy")
 
     print(f"Environment: {env_id} (obs={obs_shape}, act={act_dim})")
 
@@ -341,6 +352,24 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
                                    flex=flex, policy_arch=policy_arch, output_dir=output_dir,
                                    mutator_kwargs=mutator_kwargs,
                                    obs_shape=obs_shape if len(obs_shape) == 3 else None)
+
+    if seed_genome_path is not None:
+        seed_g = Genome.load(seed_genome_path)
+        print(f"Seeding population from {seed_genome_path}")
+        for i, g in enumerate(population):
+            # Copy policy, mutator, and compat weights from seed genome
+            g.policy.load_state_dict(seed_g.policy.state_dict())
+            g.mutator.load_state_dict(seed_g.mutator.state_dict())
+            if hasattr(g, 'compat_net') and g.compat_net is not None and seed_g.compat_net is not None:
+                g.compat_net.load_state_dict(seed_g.compat_net.state_dict())
+            if hasattr(seed_g, 'species_tag'):
+                g.species_tag = seed_g.species_tag.clone()
+            # Apply light mutation to all but first genome for diversity
+            if i > 0:
+                child = g.reproduce(generation=0, max_generations=generations)
+                g.policy.load_state_dict(child.policy.state_dict())
+                g.mutator.load_state_dict(child.mutator.state_dict())
+
     genome = population[0]
     print(f"Genome: {genome.num_policy_params()} policy params + "
           f"{genome.num_mutator_params()} mutator params + "

@@ -11,6 +11,8 @@ import imageio
 from PIL import Image, ImageDraw
 from matplotlib import cm
 from src.genome import Genome
+from src.snake_env import ensure_snake_registered
+from src.snake_shaped_env import ensure_snake_shaped_registered
 
 ENV_INFO = {
     'CartPole-v1': {
@@ -32,6 +34,14 @@ ENV_INFO = {
     'CarRacing-v3': {
         'obs_names': None,  # CNN - no named obs
         'act_names': ['Steer','Gas','Brake'], 'discrete': False, 'max_steps': 1000,
+    },
+    'SnakeShaped-v0': {
+        'obs_names': ['danger↑','danger→','danger↓','danger←','food_dr','food_dc','head_r','head_c','length','time','dir_r','dir_c'],
+        'act_names': ['Up','Right','Down','Left'], 'discrete': True, 'max_steps': 200,
+    },
+    'SnakePixels-v0': {
+        'obs_names': None,  # CNN
+        'act_names': ['Up','Right','Down','Left'], 'discrete': True, 'max_steps': 300,
     },
 }
 
@@ -215,7 +225,7 @@ def draw_cnn_panel(activations, action, info, game_h):
     ImageDraw.Draw(lbl).text((4,0), 'output (actions)', fill=(180,180,180))
     parts.append(np.array(lbl))
     
-    act_h = 54
+    act_h = max(54, len(act_names) * 17 + 6)
     act_img = Image.new('RGB', (PANEL_W, act_h), (30,30,30))
     d = ImageDraw.Draw(act_img)
     colors_pos = [(100,200,100), (100,180,255), (255,160,80)]
@@ -240,7 +250,8 @@ def render_env(env_name, genome_path, output_path, seed=42):
     g = Genome.load(genome_path)
     g.policy.eval()
     info = ENV_INFO[env_name]
-    is_cnn = env_name == 'CarRacing-v3'
+    from src.genome import PolicyCNNLarge, PolicyCNNSmall
+    is_cnn = isinstance(g.policy, (PolicyCNNLarge, PolicyCNNSmall))
     
     # Register hooks
     activations = {}
@@ -250,12 +261,19 @@ def render_env(env_name, genome_path, output_path, seed=42):
         return hook
     
     if is_cnn:
-        g.policy.conv[1].register_forward_hook(make_hook('conv1'))
-        g.policy.conv[3].register_forward_hook(make_hook('conv2'))
-        g.policy.conv[5].register_forward_hook(make_hook('conv3'))
-        g.policy.conv[7].register_forward_hook(make_hook('conv4'))
-        g.policy.fc[1].register_forward_hook(make_hook('fc_hidden'))
-        g.policy.fc[3].register_forward_hook(make_hook('output'))
+        if isinstance(g.policy, PolicyCNNSmall):
+            # 2 conv layers: conv[0]=Conv2d, conv[1]=ReLU, conv[2]=Conv2d, conv[3]=ReLU
+            g.policy.conv[1].register_forward_hook(make_hook('conv1'))
+            g.policy.conv[3].register_forward_hook(make_hook('conv2'))
+            g.policy.fc[1].register_forward_hook(make_hook('fc_hidden'))
+            g.policy.fc[3].register_forward_hook(make_hook('output'))
+        else:
+            g.policy.conv[1].register_forward_hook(make_hook('conv1'))
+            g.policy.conv[3].register_forward_hook(make_hook('conv2'))
+            g.policy.conv[5].register_forward_hook(make_hook('conv3'))
+            g.policy.conv[7].register_forward_hook(make_hook('conv4'))
+            g.policy.fc[1].register_forward_hook(make_hook('fc_hidden'))
+            g.policy.fc[3].register_forward_hook(make_hook('output'))
     else:
         # MLP — hook after each Tanh
         layer_idx = 0
@@ -271,6 +289,8 @@ def render_env(env_name, genome_path, output_path, seed=42):
         last_idx = len(g.policy.net) - 1
         g.policy.net[last_idx].register_forward_hook(make_hook('output'))
     
+    ensure_snake_registered()
+    ensure_snake_shaped_registered()
     env = gym.make(env_name, render_mode='rgb_array')
     obs, _ = env.reset(seed=seed)
     
@@ -283,6 +303,10 @@ def render_env(env_name, genome_path, output_path, seed=42):
     
     while not done and step < max_steps:
         frame = env.render()
+        # Upscale tiny grids (e.g. Snake 10x10)
+        if frame.shape[0] < 100:
+            scale = 400 // frame.shape[0]
+            frame = np.kron(frame, np.ones((scale, scale, 1))).astype(np.uint8)
         
         if is_cnn:
             obs_t = torch.from_numpy(obs).float().unsqueeze(0)
@@ -291,10 +315,10 @@ def render_env(env_name, genome_path, output_path, seed=42):
         
         with torch.no_grad():
             raw_out = g.policy(obs_t).squeeze()
-            if is_cnn:
-                action = raw_out.numpy()
-            elif info['discrete']:
+            if info['discrete']:
                 action = int(torch.argmax(raw_out).item())
+            elif is_cnn:
+                action = raw_out.numpy()
             else:
                 action = raw_out.numpy()
         

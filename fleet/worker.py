@@ -212,6 +212,14 @@ def main():
     # OMP_NUM_THREADS=1 to avoid PyTorch deadlock in fork pools
     os.environ['OMP_NUM_THREADS'] = '1'
 
+    # Ensure spawned child processes can find venv packages
+    import sys
+    venv_site = os.path.join(sys.prefix, 'lib', f'python{sys.version_info.major}.{sys.version_info.minor}', 'site-packages')
+    if os.path.isdir(venv_site):
+        existing = os.environ.get('PYTHONPATH', '')
+        if venv_site not in existing:
+            os.environ['PYTHONPATH'] = f"{venv_site}:{existing}" if existing else venv_site
+
     run_worker(
         host=args.host,
         port=args.port,
