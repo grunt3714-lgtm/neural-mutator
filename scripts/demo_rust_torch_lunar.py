@@ -48,7 +48,7 @@ def main():
 
     for threads in [1, 2, 4, 8]:
         t0 = time.time()
-        score = rt.evaluate_model_threaded(str(model_path), episodes, max_steps, threads, 42)
+        score = rt.evaluate_model_threaded(str(model_path), episodes, max_steps, threads, 42, None, None)
         dt = time.time() - t0
         eps_per_sec = episodes / dt
         print(f"threads={threads:>2} | mean_reward={score:8.3f} | {eps_per_sec:8.1f} episodes/s")

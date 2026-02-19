@@ -2,7 +2,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use rayon::prelude::*;
-use std::sync::Arc;
+use reqwest::blocking::Client;
+use serde_json::json;
+use std::sync::{Arc, Mutex};
 use tch::{no_grad_guard, CModule, Kind, Tensor};
 
 #[derive(Clone)]
@@ -115,8 +117,16 @@ fn policy_action(model: &CModule, obs: [f32; 8]) -> i64 {
     out.argmax(0, false).int64_value(&[])
 }
 
-#[pyfunction]
-fn evaluate_model_threaded(model_path: String, episodes: usize, max_steps: usize, threads: usize, seed: u64) -> PyResult<f32> {
+#[pyfunction(signature = (model_path, episodes, max_steps, threads, seed, webhook=None, progress_every=None))]
+fn evaluate_model_threaded(
+    model_path: String,
+    episodes: usize,
+    max_steps: usize,
+    threads: usize,
+    seed: u64,
+    webhook: Option<String>,
+    progress_every: Option<usize>,
+) -> PyResult<f32> {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads.max(1))
         .build()
@@ -127,25 +137,52 @@ fn evaluate_model_threaded(model_path: String, episodes: usize, max_steps: usize
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("load model failed: {e}")))?
     );
 
-    let mean = pool.install(|| {
-        (0..episodes)
-            .into_par_iter()
-            .map(|ep| {
-                let mut rng = StdRng::seed_from_u64(seed + ep as u64);
-                let mut env = CustomLunarLander::new(max_steps);
-                let mut obs = env.reset(&mut rng);
-                let mut total = 0.0_f32;
-                loop {
-                    let action = policy_action(&model, obs);
-                    let (next_obs, r, done) = env.step(action);
-                    total += r;
-                    obs = next_obs;
-                    if done { break; }
+    let scores = Arc::new(Mutex::new(vec![0.0_f32; episodes]));
+    let webhook_client = webhook.as_ref().map(|_| Client::new());
+    let every = progress_every.unwrap_or(0);
+
+    pool.install(|| {
+        (0..episodes).into_par_iter().for_each(|ep| {
+            let mut rng = StdRng::seed_from_u64(seed + ep as u64);
+            let mut env = CustomLunarLander::new(max_steps);
+            let mut obs = env.reset(&mut rng);
+            let mut total = 0.0_f32;
+            loop {
+                let action = policy_action(&model, obs);
+                let (next_obs, r, done) = env.step(action);
+                total += r;
+                obs = next_obs;
+                if done {
+                    break;
                 }
-                total
-            })
-            .sum::<f32>() / episodes as f32
+            }
+            {
+                let mut lock = scores.lock().expect("scores mutex poisoned");
+                lock[ep] = total;
+            }
+
+            if every > 0 && (ep + 1) % every == 0 {
+                if let (Some(url), Some(client)) = (&webhook, &webhook_client) {
+                    let done = ep + 1;
+                    let pct = (done as f64 / episodes as f64) * 100.0;
+                    let _ = client
+                        .post(url)
+                        .json(&json!({
+                            "content": format!(
+                                "🦀 Rust Lunar eval: {}/{} ({:.1}%)",
+                                done, episodes, pct
+                            )
+                        }))
+                        .send();
+                }
+            }
+        });
     });
+
+    let mean = {
+        let lock = scores.lock().expect("scores mutex poisoned");
+        lock.iter().sum::<f32>() / episodes as f32
+    };
 
     Ok(mean)
 }
@@ -154,7 +191,7 @@ fn evaluate_model_threaded(model_path: String, episodes: usize, max_steps: usize
 fn benchmark_thread_scaling(model_path: String, episodes: usize, max_steps: usize, seed: u64) -> PyResult<Vec<(usize, f32)>> {
     let mut out = Vec::new();
     for t in [1usize, 2, 4, 8] {
-        let score = evaluate_model_threaded(model_path.clone(), episodes, max_steps, t, seed)?;
+        let score = evaluate_model_threaded(model_path.clone(), episodes, max_steps, t, seed, None, None)?;
         out.push((t, score));
     }
     Ok(out)
