@@ -26,7 +26,7 @@ All runs use the DualMixture mutator with flexible architecture and learned spec
 
 | Training | Gameplay (with activations) |
 |---|---|
-| ![CartPole Training](results/cartpole_dm_flex_s45_50g/training_plot.png) | ![Gameplay](results/cartpole_dm_flex_s45_50g/best_gameplay.gif) |
+| ![CartPole Training](results/cartpole_dm_flex_s45_50g/training_plot.png) | <video src="results/cartpole_dm_flex_s45_50g/best_gameplay.mp4" width="400"></video> |
 
 - **Pop:** 80 · **Gens:** 50 · **Episodes:** 5 · **Seed:** 45
 - **Final architecture:** 4→64→2 (Tanh), 386 params
@@ -38,7 +38,7 @@ All runs use the DualMixture mutator with flexible architecture and learned spec
 
 | Training | Gameplay (with activations) |
 |---|---|
-| ![LunarLander Training](results/lunar_s45_300g_fleet/training_plot.png) | ![Gameplay](results/lunar_s45_300g_fleet/best_gameplay.gif) |
+| ![LunarLander Training](results/lunar_s45_300g_fleet/training_plot.png) | <video src="results/lunar_s45_300g_fleet/best_gameplay.mp4" width="400"></video> |
 
 - **Pop:** 160 · **Gens:** 300 · **Episodes:** 10 · **Seed:** 45 · **Fleet:** 4 nodes × 6 workers
 - **Final architecture:** 8→51→4 (Tanh), 667 params
@@ -50,7 +50,7 @@ All runs use the DualMixture mutator with flexible architecture and learned spec
 
 | Training | Gameplay (with activations) |
 |---|---|
-| ![Acrobot Training](results/acrobot_dm_flex_s45_300g/training_plot.png) | ![Gameplay](results/acrobot_dm_flex_s45_300g/best_gameplay.gif) |
+| ![Acrobot Training](results/acrobot_dm_flex_s45_300g/training_plot.png) | <video src="results/acrobot_dm_flex_s45_300g/best_gameplay.mp4" width="400"></video> |
 
 - **Pop:** 80 · **Gens:** 300 · **Episodes:** 10 · **Seed:** 45
 - **Final architecture:** 6→64→64→3 (Tanh), 2 layers, 112 neurons
@@ -62,7 +62,7 @@ All runs use the DualMixture mutator with flexible architecture and learned spec
 
 | Training | Gameplay (with activations) |
 |---|---|
-| ![Pendulum Training](results/pendulum_dm_flex_s45_1000g/training_plot.png) | ![Gameplay](results/pendulum_dm_flex_s45_1000g/best_gameplay.gif) |
+| ![Pendulum Training](results/pendulum_dm_flex_s45_1000g/training_plot.png) | <video src="results/pendulum_dm_flex_s45_1000g/best_gameplay.mp4" width="400"></video> |
 
 - **Pop:** 80 · **Gens:** 1000 · **Episodes:** 10 · **Seed:** 45
 - **Final architecture:** 3→32→32→1 (Tanh), 2 layers — evolved continuous output
