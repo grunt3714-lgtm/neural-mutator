@@ -257,8 +257,8 @@ def evolve_generation(population: List[Genome], crossover_rate: float = 0.3,
         if np.random.random() < crossover_rate:
             other = tournament_select(ranked)
             crossover_attempts += 1
-            # Check learned compatibility
-            if parent.is_compatible(other, compat_threshold):
+            # Check learned compatibility (bidirectional — both must agree)
+            if parent.is_compatible(other, compat_threshold) and other.is_compatible(parent, compat_threshold):
                 crossover_compatible += 1
                 try:
                     child = parent.crossover(other, generation, max_generations)
