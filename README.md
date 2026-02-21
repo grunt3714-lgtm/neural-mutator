@@ -166,6 +166,35 @@ A key question: does the mutator learn structured mutations, or is it just fancy
 
 The high mutator drift (~9.5) means the mutator weights themselves evolved far from initialization — but what the mutator *produces* is clearly structured, not random.
 
+### Structured Pairwise Mutations
+
+To rigorously test whether the mutator learns structured perturbations, we sampled 200 mutations from the best CarRacing genome (29,498 params) and compared pairwise statistics against matched Gaussian noise.
+
+![Mutation Structure](results/mutation_structure_fig.png)
+
+The mutator's pairwise correlation distribution is broad and right-skewed (panel A), with a heavy positive tail absent from random noise (KS = 0.727, p ≈ 0). Cosine similarity tells the same story (panel B). SVD analysis reveals mutations concentrate in a ~23-dimensional subspace (panel C), while random noise fills all 200 dimensions uniformly. Per-parameter mutation scale (panel E) shows the mutator selectively targets specific weights with 10× the heterogeneity of random noise (CV = 0.74 vs 0.07).
+
+### The Mutator Edits the Policy but Randomizes Itself
+
+The most striking finding emerges when we decompose mutation correlations by network layer. The mutator's parameter vector includes both the **policy** (the network that plays the game) and **itself** (the network that decides how to mutate). We measured within-layer pairwise correlation — do weights in the same layer get co-mutated?
+
+![Layer Coherence](results/layer_coherence_pub.png)
+
+| Category | Mean \|r\| | Fold vs Random |
+|---|---|---|
+| **Policy within-layer** | 0.120 | **2.16×** |
+| **Mutator within-layer** | 0.056 | **1.01×** |
+| **Cross-layer** | 0.069 | 1.24× |
+| **Random baseline** | 0.056 | 1.00× |
+
+Every policy layer — all four conv layers, both FC layers — shows coherent co-mutation at roughly 2× the random baseline (Mann-Whitney p < 10⁻⁵⁸). The mutator's own layers (encoder, corrector) are statistically indistinguishable from random noise.
+
+**The mutator learned to carefully coordinate mutations to the network it's optimizing, while treating its own weights as expendable.** It structures policy perturbations by layer — weights within the same convolutional filter or FC projection get pushed in correlated directions — but applies unstructured drift to its own internal parameters.
+
+This mirrors a deep pattern in biology: **DNA repair and replication machinery is among the most conserved code in any genome.** The mutation apparatus is under strong stabilizing selection — a mutator that coherently rewrites itself risks catastrophic self-destruction, while one that drifts randomly can adapt gradually without destabilizing the mutation strategy that natural selection has already validated. Evolution discovered that the safest way to change how you change is *not to try too hard*.
+
+The layer-by-layer heatmap (panel E) confirms this visually: bright diagonal blocks appear in the policy region, reflecting within-layer coordination, while the mutator region is uniformly dim. The mutation operator has learned the hierarchical structure of the network it evolves.
+
 ## Mutator Architecture
 
 The **DualMixtureCorrectorMutator** (8,374 params) is the sole mutator architecture. It processes policy weights in 64-element chunks through a learned encoder→corrector pipeline:
