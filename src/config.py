@@ -10,6 +10,11 @@ import argparse
 class MutatorConfig:
     mutator_type: str
     chunk_size: int = 64
+    crossover_gated_blend: bool = True
+    crossover_gate_mode: str = 'sigmoid'
+    crossover_gumbel_tau: float = 1.0
+    crossover_gumbel_hard: bool = False
+    crossover_gate_clamp: float = 0.0
     dualmix_p_gauss_policy: float = 0.20
     dualmix_gauss_scale_policy: float = 0.03
     dualmix_v2_ref_dim: int = 16
@@ -34,9 +39,22 @@ class MutatorConfig:
     perceiver_lite_meta_scale: float = 0.004
 
     def to_kwargs(self) -> dict:
+        crossover_cfg = {
+            'crossover_gated_blend': self.crossover_gated_blend,
+            'crossover_gate_mode': self.crossover_gate_mode,
+            'crossover_gumbel_tau': self.crossover_gumbel_tau,
+            'crossover_gumbel_hard': self.crossover_gumbel_hard,
+            'crossover_gate_clamp': self.crossover_gate_clamp,
+        }
+        if self.mutator_type == 'dualcorrector':
+            return {
+                'chunk_size': self.chunk_size,
+                **crossover_cfg,
+            }
         if self.mutator_type == 'dualmixture':
             return {
                 'chunk_size': self.chunk_size,
+                **crossover_cfg,
                 'p_gauss_policy': self.dualmix_p_gauss_policy,
                 'gauss_scale_policy': self.dualmix_gauss_scale_policy,
             }
@@ -127,6 +145,11 @@ def build_configs(args: argparse.Namespace) -> tuple[TrainConfig, MutatorConfig]
     mut_cfg = MutatorConfig(
         mutator_type=args.mutator,
         chunk_size=args.chunk_size,
+        crossover_gated_blend=args.crossover_gated_blend,
+        crossover_gate_mode=args.crossover_gate_mode,
+        crossover_gumbel_tau=args.crossover_gumbel_tau,
+        crossover_gumbel_hard=args.crossover_gumbel_hard,
+        crossover_gate_clamp=args.crossover_gate_clamp,
         dualmix_p_gauss_policy=args.dualmix_p_gauss_policy,
         dualmix_gauss_scale_policy=args.dualmix_gauss_scale_policy,
         dualmix_v2_ref_dim=args.dualmix_v2_ref_dim,

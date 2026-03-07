@@ -209,6 +209,21 @@ def evaluate_population(population: List[Genome], env_id: str,
     return fitnesses, profile
 
 
+def _apply_mutator_crossover_config(mutator: torch.nn.Module, cfg: dict) -> None:
+    """Apply crossover-gate runtime overrides to mutator buffers when present."""
+    if hasattr(mutator, 'crossover_gated_blend') and 'crossover_gated_blend' in cfg:
+        mutator.crossover_gated_blend.fill_(1.0 if bool(cfg['crossover_gated_blend']) else 0.0)
+    if hasattr(mutator, 'crossover_gate_mode_id') and 'crossover_gate_mode' in cfg:
+        mode = str(cfg['crossover_gate_mode']).lower().strip()
+        mutator.crossover_gate_mode_id.fill_(1.0 if mode == 'gumbel' else 0.0)
+    if hasattr(mutator, 'crossover_gumbel_tau') and 'crossover_gumbel_tau' in cfg:
+        mutator.crossover_gumbel_tau.fill_(float(cfg['crossover_gumbel_tau']))
+    if hasattr(mutator, 'crossover_gumbel_hard') and 'crossover_gumbel_hard' in cfg:
+        mutator.crossover_gumbel_hard.fill_(1.0 if bool(cfg['crossover_gumbel_hard']) else 0.0)
+    if hasattr(mutator, 'crossover_gate_clamp') and 'crossover_gate_clamp' in cfg:
+        mutator.crossover_gate_clamp.fill_(float(cfg['crossover_gate_clamp']))
+
+
 def create_population(pop_size: int, obs_dim: int, act_dim: int,
                       mutator_type: str = 'dualmixture', hidden: int = 64,
                       chunk_size: int = 64,
@@ -235,6 +250,7 @@ def create_population(pop_size: int, obs_dim: int, act_dim: int,
     from that genome while keeping policy initialization random.
     """
     population = []
+    mk = dict(mutator_kwargs or {})
     compat_mode = (
         'mutator_pair_head' if (unified_mating and unified_mate_head)
         else ('mutator_affinity' if unified_mating else ('binary_strict' if compat_binary else 'distance'))
@@ -249,6 +265,7 @@ def create_population(pop_size: int, obs_dim: int, act_dim: int,
 
     if init_genome_path:
         seed = Genome.load(init_genome_path)
+        _apply_mutator_crossover_config(seed.mutator, mk)
         seed.compat_threshold = float(compat_threshold)
         seed.evolve_compat_threshold = bool(learn_compat_threshold)
         seed.compat_mode = compat_mode
@@ -271,11 +288,12 @@ def create_population(pop_size: int, obs_dim: int, act_dim: int,
             policy = Policy(obs_dim, act_dim, hidden)
         if mutator_type not in available_mutator_types():
             raise ValueError(f"Unknown mutator type: {mutator_type}")
-        mk = dict(mutator_kwargs or {})
         mk.setdefault('chunk_size', chunk_size)
         mutator = create_mutator(mutator_type, **mk)
+        _apply_mutator_crossover_config(mutator, mk)
         if seed_mutator_state is not None:
             mutator.load_state_dict(seed_mutator_state)
+            _apply_mutator_crossover_config(mutator, mk)
 
         compat_net = None
         if speciation and (not unified_mating):
@@ -634,6 +652,8 @@ def evolve_generation(population: List[Genome], crossover_rate: float = 0.3,
     pair_head_selected_parent_ids = []
     pair_head_selected_pairs = []
     pair_head_selected_parent_species = []
+    crossover_gate_alpha_means = []
+    crossover_gate_alpha_stds = []
     lineage_gate_attempts = 0
     lineage_gate_blocked = 0
     crossover_edges = set()  # undirected parent-parent edges for behavioral-species graph
@@ -820,6 +840,9 @@ def evolve_generation(population: List[Genome], crossover_rate: float = 0.3,
                 noise = torch.randn_like(flat) * 0.01
                 child.set_flat_weights(flat + noise)
                 child_method = 'mutation_fallback'
+        if child_method == 'crossover':
+            crossover_gate_alpha_means.append(float(getattr(child, 'crossover_gate_alpha_mean', 0.5)))
+            crossover_gate_alpha_stds.append(float(getattr(child, 'crossover_gate_alpha_std', 0.0)))
         if lineage_tracker is not None:
             parents = [parent]
             if child_method == 'crossover':
@@ -918,6 +941,18 @@ def evolve_generation(population: List[Genome], crossover_rate: float = 0.3,
     species_info['pair_head_unique_pair_rate'] = (
         float(len(set(pair_head_selected_pairs))) / float(max(len(pair_head_selected_pairs), 1))
     )
+    if crossover_gate_alpha_means:
+        alpha_mean_arr = np.asarray(crossover_gate_alpha_means, dtype=np.float64)
+        alpha_std_arr = np.asarray(crossover_gate_alpha_stds, dtype=np.float64)
+        species_info['crossover_gate_alpha_mean'] = float(alpha_mean_arr.mean())
+        species_info['crossover_gate_alpha_std'] = float(alpha_mean_arr.std())
+        species_info['crossover_gate_alpha_chunkstd_mean'] = float(alpha_std_arr.mean())
+        species_info['crossover_gate_alpha_chunkstd_std'] = float(alpha_std_arr.std())
+    else:
+        species_info['crossover_gate_alpha_mean'] = 0.0
+        species_info['crossover_gate_alpha_std'] = 0.0
+        species_info['crossover_gate_alpha_chunkstd_mean'] = 0.0
+        species_info['crossover_gate_alpha_chunkstd_std'] = 0.0
     if pair_head_selected_parent_species:
         vals = np.asarray(pair_head_selected_parent_species, dtype=np.int64)
         counts = np.bincount(vals - vals.min())
@@ -1161,6 +1196,10 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
         'crossover_rejected_pair_head': [],
         'crossover_rejected_compat': [],
         'crossover_rejected_lineage': [],
+        'crossover_gate_alpha_mean': [],
+        'crossover_gate_alpha_std': [],
+        'crossover_gate_alpha_chunkstd_mean': [],
+        'crossover_gate_alpha_chunkstd_std': [],
         'mean_compat_threshold': [],
         'std_compat_threshold': [],
         'compat_guardrail_bias': [],
@@ -1371,6 +1410,10 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
         history['crossover_rejected_pair_head'].append(float(species_info.get('crossover_rejected_pair_head', 0)))
         history['crossover_rejected_compat'].append(float(species_info.get('crossover_rejected_compat', 0)))
         history['crossover_rejected_lineage'].append(float(species_info.get('crossover_rejected_lineage', 0)))
+        history['crossover_gate_alpha_mean'].append(float(species_info.get('crossover_gate_alpha_mean', 0.0)))
+        history['crossover_gate_alpha_std'].append(float(species_info.get('crossover_gate_alpha_std', 0.0)))
+        history['crossover_gate_alpha_chunkstd_mean'].append(float(species_info.get('crossover_gate_alpha_chunkstd_mean', 0.0)))
+        history['crossover_gate_alpha_chunkstd_std'].append(float(species_info.get('crossover_gate_alpha_chunkstd_std', 0.0)))
         thresholds = [float(getattr(g, 'compat_threshold', compat_threshold)) for g in population]
         history['mean_compat_threshold'].append(float(np.mean(thresholds)))
         history['std_compat_threshold'].append(float(np.std(thresholds)))
@@ -1467,6 +1510,8 @@ def run_evolution(env_id: str = 'CartPole-v1', pop_size: int = 30,
                   f"Rej(ph/compat/lin): {int(species_info.get('crossover_rejected_pair_head', 0))}/"
                   f"{int(species_info.get('crossover_rejected_compat', 0))}/"
                   f"{int(species_info.get('crossover_rejected_lineage', 0))} "
+                  f"GateAlpha μ/σ: {species_info.get('crossover_gate_alpha_mean', 0.0):.3f}/"
+                  f"{species_info.get('crossover_gate_alpha_std', 0.0):.3f} "
                   f"ExecRate: {float(species_info.get('crossover_executed', 0))/float(max(species_info.get('crossover_attempts', 1), 1)):.2f} | "
                   f"BhvComp: {int(species_info.get('behavioral_components', 0))} "
                   f"BhvLargest: {float(species_info.get('behavioral_largest_component_frac', 0.0)):.2f} "

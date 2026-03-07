@@ -46,6 +46,18 @@ def main():
     parser.add_argument('--policy-arch', default='mlp', choices=['mlp', 'cnn', 'cnn-large'],
                         help='Policy architecture (mlp or cnn)')
     parser.add_argument('--chunk-size', type=int, default=64, help='Mutator chunk size')
+    parser.add_argument('--crossover-gated-blend', dest='crossover_gated_blend', action='store_true',
+                        default=True, help='Enable learned gated parent blend during crossover (default: on)')
+    parser.add_argument('--no-crossover-gated-blend', dest='crossover_gated_blend', action='store_false',
+                        help='Disable learned gated blend and use legacy 0.5 averaging during crossover')
+    parser.add_argument('--crossover-gate-mode', type=str, default='sigmoid', choices=['sigmoid', 'gumbel'],
+                        help='Parent blend gate mode for crossover (sigmoid or gumbel)')
+    parser.add_argument('--crossover-gumbel-tau', type=float, default=1.0,
+                        help='Gumbel-softmax temperature for crossover gate mode=gumbel')
+    parser.add_argument('--crossover-gumbel-hard', action='store_true',
+                        help='Use hard one-hot gumbel-softmax gate during crossover')
+    parser.add_argument('--crossover-gate-clamp', type=float, default=0.0,
+                        help='If >0 and gate mode=sigmoid, clamp alpha to [eps, 1-eps]')
     parser.add_argument('--dualmix-p-gauss-policy', type=float, default=0.20,
                         help='Dualmixture: probability of Gaussian escape on policy slice')
     parser.add_argument('--dualmix-gauss-scale-policy', type=float, default=0.03,

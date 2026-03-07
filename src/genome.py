@@ -11,6 +11,7 @@ Natural selection handles the rest — if a mutator destroys itself, it dies.
 import io
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from typing import Tuple, Optional, List
 import copy
@@ -436,7 +437,17 @@ class DualHeadCorrectorMutator(nn.Module):
     Expected weight_coords: 1D tensor where weight_coords[0] = n_policy (split index).
     """
 
-    def __init__(self, chunk_size: int = 64, ref_dim: int = 16, hidden: int = 64):
+    def __init__(
+        self,
+        chunk_size: int = 64,
+        ref_dim: int = 16,
+        hidden: int = 64,
+        crossover_gated_blend: bool = True,
+        crossover_gate_mode: str = 'sigmoid',
+        crossover_gumbel_tau: float = 1.0,
+        crossover_gumbel_hard: bool = False,
+        crossover_gate_clamp: float = 0.0,
+    ):
         super().__init__()
         self.chunk_size = chunk_size
         self.ref_dim = ref_dim
@@ -454,17 +465,81 @@ class DualHeadCorrectorMutator(nn.Module):
             nn.Linear(hidden, chunk_size),
             nn.Tanh(),
         )
+        self.gate_head = nn.Sequential(
+            nn.Linear(ref_dim * 4, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, 2),
+        )
 
         # Policy head explores more; meta head stays conservative.
         self.correction_scale_policy = nn.Parameter(torch.tensor(0.03))
         self.correction_scale_meta = nn.Parameter(torch.tensor(0.01))
         self.explore_scale_policy = nn.Parameter(torch.tensor(0.01))
         self.explore_scale_meta = nn.Parameter(torch.tensor(0.002))
+        self.register_buffer(
+            'crossover_gated_blend',
+            torch.tensor(1.0 if bool(crossover_gated_blend) else 0.0),
+        )
+        gate_mode = str(crossover_gate_mode).lower().strip()
+        if gate_mode not in {'sigmoid', 'gumbel'}:
+            gate_mode = 'sigmoid'
+        self.register_buffer(
+            'crossover_gate_mode_id',
+            torch.tensor(1.0 if gate_mode == 'gumbel' else 0.0),
+        )
+        self.register_buffer('crossover_gumbel_tau', torch.tensor(float(crossover_gumbel_tau)))
+        self.register_buffer(
+            'crossover_gumbel_hard',
+            torch.tensor(1.0 if bool(crossover_gumbel_hard) else 0.0),
+        )
+        self.register_buffer('crossover_gate_clamp', torch.tensor(float(crossover_gate_clamp)))
+        self.last_crossover_gate_stats: dict | None = None
 
     def _split_index(self, flat_weights: torch.Tensor, weight_coords: torch.Tensor | None) -> int:
         if weight_coords is None or weight_coords.numel() < 1:
             return int(flat_weights.shape[0] // 2)
         return int(weight_coords.view(-1)[0].item())
+
+    def _crossover_base_chunks(
+        self,
+        chunks_a: torch.Tensor,
+        chunks_b: torch.Tensor,
+    ) -> torch.Tensor:
+        if float(self.crossover_gated_blend.item()) <= 0.5:
+            self.last_crossover_gate_stats = {
+                'enabled': False,
+                'mode': 'average',
+                'alpha_mean': 0.5,
+                'alpha_std': 0.0,
+            }
+            return (chunks_a + chunks_b) / 2
+
+        encoded_a = self.encoder(chunks_a)
+        encoded_b = self.encoder(chunks_b)
+        gate_in = torch.cat([encoded_a, encoded_b, encoded_a - encoded_b, encoded_a * encoded_b], dim=1)
+        logits = self.gate_head(gate_in)
+
+        if float(self.crossover_gate_mode_id.item()) >= 0.5:
+            tau = max(float(self.crossover_gumbel_tau.item()), 1e-6)
+            hard = float(self.crossover_gumbel_hard.item()) >= 0.5
+            probs = F.gumbel_softmax(logits, tau=tau, hard=hard, dim=1)
+            alpha = probs[:, 0]
+            mode = 'gumbel'
+        else:
+            alpha = torch.sigmoid(logits[:, 0] - logits[:, 1])
+            eps = float(self.crossover_gate_clamp.item())
+            if eps > 0.0:
+                eps = min(max(eps, 0.0), 0.499999)
+                alpha = torch.clamp(alpha, eps, 1.0 - eps)
+            mode = 'sigmoid'
+
+        self.last_crossover_gate_stats = {
+            'enabled': True,
+            'mode': mode,
+            'alpha_mean': float(alpha.mean().item()),
+            'alpha_std': float(alpha.std(unbiased=False).item()),
+        }
+        return alpha.unsqueeze(1) * chunks_a + (1.0 - alpha).unsqueeze(1) * chunks_b
 
     def mutate_genome(self, flat_weights: torch.Tensor,
                       weight_coords: torch.Tensor = None,
@@ -472,7 +547,7 @@ class DualHeadCorrectorMutator(nn.Module):
         n = flat_weights.shape[0]
         cs = self.chunk_size
         pad_len = (cs - n % cs) % cs
-        padded = torch.cat([flat_weights, torch.zeros(pad_len)])
+        padded = torch.cat([flat_weights, torch.zeros(pad_len, device=flat_weights.device, dtype=flat_weights.dtype)])
 
         split = self._split_index(flat_weights, weight_coords)
         n_chunks = padded.shape[0] // cs
@@ -489,14 +564,15 @@ class DualHeadCorrectorMutator(nn.Module):
 
         if other_weights is not None:
             other_pad = torch.cat([
-                other_weights,
-                torch.zeros(max(0, padded.shape[0] - other_weights.shape[0])),
+                other_weights.to(flat_weights.device, dtype=flat_weights.dtype),
+                torch.zeros(max(0, padded.shape[0] - other_weights.shape[0]), device=flat_weights.device, dtype=flat_weights.dtype),
             ])
             other_pad = other_pad[:padded.shape[0]]
             chunks_a = padded.view(-1, cs)
             chunks_b = other_pad.view(-1, cs)
-            base = (chunks_a + chunks_b) / 2
+            base = self._crossover_base_chunks(chunks_a, chunks_b)
         else:
+            self.last_crossover_gate_stats = None
             base = padded.view(-1, cs)
 
         corr = torch.zeros_like(base)
@@ -536,10 +612,24 @@ class DualMixtureCorrectorMutator(DualHeadCorrectorMutator):
         chunk_size: int = 64,
         ref_dim: int = 16,
         hidden: int = 64,
+        crossover_gated_blend: bool = True,
+        crossover_gate_mode: str = 'sigmoid',
+        crossover_gumbel_tau: float = 1.0,
+        crossover_gumbel_hard: bool = False,
+        crossover_gate_clamp: float = 0.0,
         p_gauss_policy: float = 0.20,
         gauss_scale_policy: float = 0.03,
     ):
-        super().__init__(chunk_size=chunk_size, ref_dim=ref_dim, hidden=hidden)
+        super().__init__(
+            chunk_size=chunk_size,
+            ref_dim=ref_dim,
+            hidden=hidden,
+            crossover_gated_blend=crossover_gated_blend,
+            crossover_gate_mode=crossover_gate_mode,
+            crossover_gumbel_tau=crossover_gumbel_tau,
+            crossover_gumbel_hard=crossover_gumbel_hard,
+            crossover_gate_clamp=crossover_gate_clamp,
+        )
         # Store as buffers/tensors so they serialize nicely.
         self.p_gauss_policy = nn.Parameter(torch.tensor(float(p_gauss_policy)), requires_grad=False)
         self.gauss_scale_policy = nn.Parameter(torch.tensor(float(gauss_scale_policy)), requires_grad=False)
@@ -922,14 +1012,38 @@ def create_mutator(mutator_type: str, **kwargs) -> nn.Module:
 
     mut_cls = MUTATOR_REGISTRY[mutator_type]
 
+    if mutator_type == 'dualcorrector':
+        ctor = {}
+        for key in (
+            'chunk_size',
+            'ref_dim',
+            'hidden',
+            'crossover_gated_blend',
+            'crossover_gate_mode',
+            'crossover_gumbel_tau',
+            'crossover_gumbel_hard',
+            'crossover_gate_clamp',
+        ):
+            if key in kwargs:
+                ctor[key] = kwargs[key]
+        return mut_cls(**ctor)
+
     if mutator_type == 'dualmixture':
         ctor = {}
-        if 'chunk_size' in kwargs:
-            ctor['chunk_size'] = kwargs['chunk_size']
-        if 'p_gauss_policy' in kwargs:
-            ctor['p_gauss_policy'] = kwargs['p_gauss_policy']
-        if 'gauss_scale_policy' in kwargs:
-            ctor['gauss_scale_policy'] = kwargs['gauss_scale_policy']
+        for key in (
+            'chunk_size',
+            'ref_dim',
+            'hidden',
+            'crossover_gated_blend',
+            'crossover_gate_mode',
+            'crossover_gumbel_tau',
+            'crossover_gumbel_hard',
+            'crossover_gate_clamp',
+            'p_gauss_policy',
+            'gauss_scale_policy',
+        ):
+            if key in kwargs:
+                ctor[key] = kwargs[key]
         return mut_cls(**ctor)
 
     if mutator_type == 'dualmixture_v2':
@@ -1194,6 +1308,8 @@ class Genome:
         self.fitness = 0.0
         self.self_replication_fidelity = 0.0  # how well mutator preserves itself
         self.mutator_delta_norm = 0.0  # magnitude of mutator weight change
+        self.crossover_gate_alpha_mean = 0.0
+        self.crossover_gate_alpha_std = 0.0
         self.species_id = -1  # assigned during speciation
         # Learned structural mutation rate (only meaningful for FlexiblePolicy)
         self.structural_rate = self.DEFAULT_STRUCTURAL_RATE
@@ -1496,6 +1612,7 @@ class Genome:
         # Let the fitter parent's mutator see both genomes and decide
         policy_coords = torch.tensor(self._policy_weight_coords(n_policy), dtype=torch.long)
         mutated_full = self.mutator.mutate_genome(my_flat, weight_coords=policy_coords, other_weights=other_flat)
+        gate_stats = getattr(self.mutator, 'last_crossover_gate_stats', None)
         
         # Extract child weights from mutator output
         n_mutator = self.num_mutator_params()
@@ -1558,6 +1675,12 @@ class Genome:
         child.self_replication_fidelity = fidelity
         child.mutator_delta_norm = mutator_delta_norm
         child.structural_rate = (self.structural_rate + other.structural_rate) / 2
+        if gate_stats:
+            child.crossover_gate_alpha_mean = float(gate_stats.get('alpha_mean', 0.5))
+            child.crossover_gate_alpha_std = float(gate_stats.get('alpha_std', 0.0))
+        else:
+            child.crossover_gate_alpha_mean = 0.5
+            child.crossover_gate_alpha_std = 0.0
         if child.evolve_compat_threshold and child.compat_net is not None:
             sigma = self.COMPAT_THRESHOLD_MUTATION_STD_CROSS
             z = np.random.randn()
@@ -1668,7 +1791,13 @@ class Genome:
         mut_kwargs = {}
         # Infer constructor shapes from saved state to support non-default configs
         # across heterogeneous workers.
-        if mutator_key == 'dualmixture_v2' and 'group_log_scales' in mut_state:
+        if mutator_key in {'dualcorrector', 'dualmixture'}:
+            if 'encoder.0.weight' in mut_state:
+                mut_kwargs['chunk_size'] = int(mut_state['encoder.0.weight'].shape[1])
+                mut_kwargs['ref_dim'] = int(mut_state['encoder.0.weight'].shape[0])
+            if 'corrector.0.weight' in mut_state:
+                mut_kwargs['hidden'] = int(mut_state['corrector.0.weight'].shape[0])
+        elif mutator_key == 'dualmixture_v2' and 'group_log_scales' in mut_state:
             mut_kwargs['max_policy_groups'] = int(mut_state['group_log_scales'].numel())
         elif mutator_key == 'global_lowrank':
             if 'encoder.0.weight' in mut_state:
@@ -1692,7 +1821,12 @@ class Genome:
         if has_head_state and 'compat_head.projection' in mut_state:
             head_dim = int(mut_state['compat_head.projection'].shape[0])
             _attach_mutator_compat_head(mutator, core_dim=head_dim)
-        mutator.load_state_dict(mut_state)
+        strict_mutator_load = True
+        if mutator_key in {'dualcorrector', 'dualmixture'}:
+            has_gate_state = any(str(k).startswith('gate_head.') for k in mut_state.keys())
+            if not has_gate_state:
+                strict_mutator_load = False
+        mutator.load_state_dict(mut_state, strict=strict_mutator_load)
         compat_net = None
         if 'compat_state' in data:
             compat_net = CompatibilityNet(data['compat_genome_dim'])
