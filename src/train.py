@@ -17,7 +17,8 @@ import numpy as np
 
 from .evolution import run_evolution
 from .genome import available_mutator_types
-from .progress import ProgressFileSink, DiscordTqdmSink, ProgressReporter
+from .lineage import generate_lineage_plots
+from .progress import ProgressFileSink, DiscordTqdmSink, DiscordMessageSink, ProgressReporter
 from .config import build_configs
 
 
@@ -49,12 +50,80 @@ def main():
                         help='Dualmixture: probability of Gaussian escape on policy slice')
     parser.add_argument('--dualmix-gauss-scale-policy', type=float, default=0.03,
                         help='Dualmixture: Gaussian escape noise scale on policy slice')
+    parser.add_argument('--dualmix-v2-ref-dim', type=int, default=16,
+                        help='Dualmixture v2: chunk encoder/reference dimension')
+    parser.add_argument('--dualmix-v2-hidden', type=int, default=64,
+                        help='Dualmixture v2: hidden width for mutation heads')
+    parser.add_argument('--dualmix-v2-lowrank-rank', type=int, default=4,
+                        help='Dualmixture v2: low-rank factor rank for policy deltas')
+    parser.add_argument('--dualmix-v2-max-policy-groups', type=int, default=8,
+                        help='Dualmixture v2: max number of policy chunk groups')
+    parser.add_argument('--dualmix-v2-policy-corr-scale', type=float, default=0.025,
+                        help='Dualmixture v2: policy corrector scale')
+    parser.add_argument('--dualmix-v2-policy-noise-scale', type=float, default=0.008,
+                        help='Dualmixture v2: policy exploration noise scale')
+    parser.add_argument('--dualmix-v2-meta-corr-scale', type=float, default=0.01,
+                        help='Dualmixture v2: meta (mutator+compat) corrector scale')
+    parser.add_argument('--dualmix-v2-meta-noise-scale', type=float, default=0.002,
+                        help='Dualmixture v2: meta (mutator+compat) exploration noise scale')
+    parser.add_argument('--global-lowrank-block-size', type=int, default=64,
+                        help='Global low-rank: block size')
+    parser.add_argument('--global-lowrank-ref-dim', type=int, default=16,
+                        help='Global low-rank: reference/context dimension')
+    parser.add_argument('--global-lowrank-hidden', type=int, default=64,
+                        help='Global low-rank: hidden width for heads')
+    parser.add_argument('--global-lowrank-rank', type=int, default=4,
+                        help='Global low-rank: low-rank factor rank')
+    parser.add_argument('--global-lowrank-policy-scale', type=float, default=0.02,
+                        help='Global low-rank: policy delta scale')
+    parser.add_argument('--global-lowrank-meta-scale', type=float, default=0.006,
+                        help='Global low-rank: meta delta scale')
+    parser.add_argument('--metastable-lowrank-block-size', type=int, default=64,
+                        help='Metastable low-rank: block size')
+    parser.add_argument('--metastable-lowrank-ref-dim', type=int, default=16,
+                        help='Metastable low-rank: reference/context dimension')
+    parser.add_argument('--metastable-lowrank-hidden', type=int, default=64,
+                        help='Metastable low-rank: hidden width for heads')
+    parser.add_argument('--metastable-lowrank-rank', type=int, default=4,
+                        help='Metastable low-rank: low-rank factor rank')
+    parser.add_argument('--metastable-lowrank-policy-scale', type=float, default=0.02,
+                        help='Metastable low-rank: policy delta scale')
+    parser.add_argument('--metastable-lowrank-meta-scale', type=float, default=0.006,
+                        help='Metastable low-rank: conservative meta delta scale')
+    parser.add_argument('--metastable-lowrank-risk-base', type=float, default=0.08,
+                        help='Metastable low-rank: baseline endogenous risk level')
+    parser.add_argument('--metastable-lowrank-risk-gain', type=float, default=0.28,
+                        help='Metastable low-rank: learned per-block risk gain')
+    parser.add_argument('--metastable-lowrank-tail-scale', type=float, default=0.10,
+                        help='Metastable low-rank: heavy-tail exploration scale on policy slice')
+    parser.add_argument('--perceiver-lite-block-size', type=int, default=64,
+                        help='Perceiver-lite: block size')
+    parser.add_argument('--perceiver-lite-ref-dim', type=int, default=16,
+                        help='Perceiver-lite: token/latent dimension')
+    parser.add_argument('--perceiver-lite-hidden', type=int, default=64,
+                        help='Perceiver-lite: hidden width for decoder')
+    parser.add_argument('--perceiver-lite-latent-count', type=int, default=8,
+                        help='Perceiver-lite: number of latent slots')
+    parser.add_argument('--perceiver-lite-policy-scale', type=float, default=0.018,
+                        help='Perceiver-lite: policy delta scale')
+    parser.add_argument('--perceiver-lite-meta-scale', type=float, default=0.004,
+                        help='Perceiver-lite: conservative meta delta scale')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--output', default='results', help='Output directory')
     parser.add_argument('--speciation', action='store_true',
                         help='Enable learned speciation (compat net in genome)')
     parser.add_argument('--compat-threshold', type=float, default=0.5,
-                        help='Compatibility threshold for crossover (0-1)')
+                        help='Initial/fixed compatibility threshold for crossover (0-1)')
+    parser.add_argument('--learn-compat-threshold', action='store_true',
+                        help='Evolve per-genome compatibility thresholds instead of using a fixed global value')
+    parser.add_argument('--compat-rate-guardrail', action='store_true',
+                        help='Enable a gentle run-level compatibility-rate guardrail for crossover gating')
+    parser.add_argument('--compat-rate-target-low', type=float, default=0.35,
+                        help='Guardrail lower target for crossover compatibility rate')
+    parser.add_argument('--compat-rate-target-high', type=float, default=0.75,
+                        help='Guardrail upper target for crossover compatibility rate')
+    parser.add_argument('--compat-rate-adjust', type=float, default=0.03,
+                        help='Guardrail per-generation gate bias adjustment step')
     parser.add_argument('--flex', action='store_true',
                         help='Enable flexible architecture with structural mutations')
     parser.add_argument('--complexity-cost', type=float, default=0.0,
@@ -75,7 +144,52 @@ def main():
                         help='Discord channel for built-in tqdm progress (default: #training)')
     parser.add_argument('--no-discord-tqdm', action='store_true',
                         help='Disable built-in tqdm.contrib.discord progress updates')
+    parser.add_argument('--survivor-fraction', type=float, default=0.25,
+                        help='Fraction of top genomes to carry over each generation (prevents near-100% cull)')
+    parser.add_argument('--init-genome', default=None,
+                        help='Optional path to a seed genome (.pt) used to initialize population (policy + mutator)')
+    parser.add_argument('--init-mutator-from-genome', default=None,
+                        help='Optional path to a seed genome (.pt) used to initialize mutator only; policy stays random')
+    parser.add_argument('--mutation-decay', action='store_true',
+                        help='Enable legacy generation-based mutation decay (default: off, constant mutation scale)')
+    parser.add_argument('--compat-binary', action='store_true',
+                        help='Use binary-classifier pretraining for compatibility net (instead of contrastive)')
+    parser.add_argument('--unified-mating', action='store_true',
+                        help='Use unified mating/speciation decision path')
+    parser.add_argument('--unified-mate-head', action='store_true',
+                        help='In unified mode, use learned pairwise head over mutator embeddings (model-owned)')
+    parser.add_argument('--legacy-unified-affinity', action='store_true',
+                        help='Deprecated: in unified mode, keep legacy mutator-affinity gating instead of pair-head')
+    parser.add_argument('--no-compat-pretrain', action='store_true',
+                        help='Disable compatibility-net pretraining (cold-start compat net)')
+    parser.add_argument('--mate-choice', action='store_true',
+                        help='Enable experimental mutual mate-choice selection')
+    parser.add_argument('--mate-choice-topk', type=int, default=10,
+                        help='Top-k by fitness used as mate-choice candidate pool')
+    parser.add_argument('--mate-choice-threshold', type=float, default=0.0,
+                        help='Mutual preference threshold for accepting a pair')
+    parser.add_argument('--mate-choice-temperature', type=float, default=1.0,
+                        help='Softmax temperature for mate-choice candidate sampling')
+    parser.add_argument('--lineage-min-distance', type=int, default=0,
+                        help='Minimum lineage distance (shared-ancestor hops) required for crossover; 0 disables.')
+    parser.add_argument('--lineage-max-distance', type=int, default=-1,
+                        help='Maximum lineage distance allowed for crossover; -1 disables upper bound.')
+    parser.add_argument('--lineage-distance-depth', type=int, default=32,
+                        help='Ancestor search depth used for lineage distance checks.')
+    parser.add_argument('--lineage-assign-require-common-ancestor', action='store_true',
+                        help='During species assignment, only compare against species members sharing a common ancestor within depth.')
+    parser.add_argument('--lineage-assign-depth', type=int, default=32,
+                        help='Ancestor search depth used for lineage-aware species assignment filtering.')
     args = parser.parse_args()
+    if args.init_genome and args.init_mutator_from_genome:
+        parser.error('Use only one of --init-genome or --init-mutator-from-genome')
+    if args.unified_mate_head and not args.unified_mating:
+        parser.error('--unified-mate-head requires --unified-mating')
+    if args.unified_mate_head and args.legacy_unified_affinity:
+        parser.error('Choose only one of --unified-mate-head or --legacy-unified-affinity')
+    effective_unified_mate_head = bool(args.unified_mating and (args.unified_mate_head or not args.legacy_unified_affinity))
+    if args.unified_mating and (not args.unified_mate_head) and (not args.legacy_unified_affinity):
+        print("Unified mating default: enabling mutator-owned pair-head (use --legacy-unified-affinity to keep old affinity mode)")
     train_cfg, mut_cfg = build_configs(args)
 
     os.makedirs(train_cfg.output, exist_ok=True)
@@ -102,9 +216,17 @@ def main():
     if not args.no_discord_tqdm:
         token = os.getenv('TQDM_DISCORD_TOKEN') or _load_discord_token_from_openclaw()
         if token and args.discord_channel_id:
-            progress_sinks.append(DiscordTqdmSink(train_cfg.generations, token, args.discord_channel_id,
-                                                     pop_size=train_cfg.pop_size))
-            print(f"Discord tqdm: enabled (channel {args.discord_channel_id})")
+            try:
+                progress_sinks.append(DiscordTqdmSink(train_cfg.generations, token, args.discord_channel_id,
+                                                         pop_size=train_cfg.pop_size))
+                print(f"Discord tqdm: enabled (channel {args.discord_channel_id})")
+            except Exception as e:
+                print(f"Discord tqdm: init failed ({e}), trying REST fallback")
+                try:
+                    progress_sinks.append(DiscordMessageSink(token, args.discord_channel_id))
+                    print(f"Discord REST fallback: enabled")
+                except Exception as e2:
+                    print(f"Discord progress: all methods failed ({e2})")
         else:
             print("Discord tqdm: disabled (missing token/channel)")
 
@@ -137,6 +259,15 @@ def main():
             seed=train_cfg.seed,
             speciation=train_cfg.speciation,
             compat_threshold=train_cfg.compat_threshold,
+            learn_compat_threshold=args.learn_compat_threshold,
+            compat_binary=args.compat_binary,
+            compat_pretrain=(not args.no_compat_pretrain),
+            unified_mating=args.unified_mating,
+            unified_mate_head=effective_unified_mate_head,
+            compat_rate_guardrail=train_cfg.compat_rate_guardrail,
+            compat_rate_target_low=train_cfg.compat_rate_target_low,
+            compat_rate_target_high=train_cfg.compat_rate_target_high,
+            compat_rate_adjust=train_cfg.compat_rate_adjust,
             flex=train_cfg.flex,
             policy_arch=train_cfg.policy_arch,
             complexity_cost=train_cfg.complexity_cost,
@@ -145,6 +276,19 @@ def main():
             fleet=fleet,
             progress_callback=progress_callback,
             mutator_kwargs=mut_cfg.to_kwargs(),
+            init_genome_path=args.init_genome,
+            init_mutator_from_genome_path=args.init_mutator_from_genome,
+            mutation_decay=args.mutation_decay,
+            mate_choice=train_cfg.mate_choice,
+            mate_choice_topk=train_cfg.mate_choice_topk,
+            mate_choice_threshold=train_cfg.mate_choice_threshold,
+            mate_choice_temperature=train_cfg.mate_choice_temperature,
+            lineage_min_distance=args.lineage_min_distance,
+            lineage_max_distance=args.lineage_max_distance,
+            lineage_distance_depth=args.lineage_distance_depth,
+            lineage_assign_require_common_ancestor=args.lineage_assign_require_common_ancestor,
+            lineage_assign_depth=args.lineage_assign_depth,
+            survivor_fraction=args.survivor_fraction,
         )
     elapsed = time.time() - start
 
@@ -153,6 +297,9 @@ def main():
     print(f"Final mean:  {history['mean'][-1]:.2f}")
     print(f"Final mean fidelity: {history['mean_fidelity'][-1]:.4f}")
     print(f"Final mean drift: {history['mean_mutator_drift'][-1]:.4f}")
+    if history.get('mean_policy_l2'):
+        print(f"Final policy ||w||₂ (mean/best): {history['mean_policy_l2'][-1]:.3f}/{history['best_policy_l2'][-1]:.3f}")
+        print(f"Final policy |w| (mean/best): {history['mean_policy_abs'][-1]:.5f}/{history['best_policy_abs'][-1]:.5f}")
     if train_cfg.speciation:
         print(f"Final species count: {history['num_species'][-1]}")
         print(f"Final compat rate: {history['crossover_compat_rate'][-1]:.2f}")
@@ -175,9 +322,27 @@ def main():
         'mutator_config': mut_cfg.to_kwargs(),
         'speciation': train_cfg.speciation,
         'compat_threshold': train_cfg.compat_threshold,
+        'learn_compat_threshold': args.learn_compat_threshold,
+        'compat_binary': args.compat_binary,
+        'compat_pretrain': (not args.no_compat_pretrain),
+        'unified_mating': args.unified_mating,
+        'unified_mate_head': effective_unified_mate_head,
+        'legacy_unified_affinity': args.legacy_unified_affinity,
+        'compat_rate_guardrail': train_cfg.compat_rate_guardrail,
+        'compat_rate_target_low': train_cfg.compat_rate_target_low,
+        'compat_rate_target_high': train_cfg.compat_rate_target_high,
+        'compat_rate_adjust': train_cfg.compat_rate_adjust,
         'pop_size': train_cfg.pop_size,
         'generations': train_cfg.generations,
         'seed': train_cfg.seed,
+        'init_genome': args.init_genome,
+        'init_mutator_from_genome': args.init_mutator_from_genome,
+        'mutation_decay': args.mutation_decay,
+        'mate_choice': train_cfg.mate_choice,
+        'mate_choice_topk': train_cfg.mate_choice_topk,
+        'mate_choice_threshold': train_cfg.mate_choice_threshold,
+        'mate_choice_temperature': train_cfg.mate_choice_temperature,
+        'survivor_fraction': args.survivor_fraction,
         'elapsed_sec': elapsed,
         'history': history,
     }
@@ -198,7 +363,8 @@ def main():
 
     # Plot
     has_complexity = train_cfg.complexity_cost > 0
-    n_plots = 3 + int(args.speciation) + int(has_complexity)
+    has_weight_scale = bool(history.get('mean_policy_l2'))
+    n_plots = 3 + int(has_weight_scale) + int(args.speciation) + int(has_complexity)
     fig, axes = plt.subplots(n_plots, 1, figsize=(10, 4.5 * n_plots))
     gens = range(len(history['best']))
 
@@ -243,8 +409,26 @@ def main():
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    # Parameter count
+    # Policy weight scale
     plot_idx = 3
+    if has_weight_scale:
+        ax = axes[plot_idx]
+        ax.plot(gens, history['mean_policy_l2'], label='Mean ||w||₂', color='slateblue')
+        ax.plot(gens, history['best_policy_l2'], label='Best-genome ||w||₂', color='indigo', linewidth=2)
+        ax2 = ax.twinx()
+        ax2.plot(gens, history['mean_policy_abs'], label='Mean |w|', color='darkorange', linestyle='--', alpha=0.8)
+        ax2.plot(gens, history['best_policy_abs'], label='Best-genome |w|', color='orangered', linestyle='-.', alpha=0.8)
+        ax.set_xlabel('Generation')
+        ax.set_ylabel('L2 norm')
+        ax2.set_ylabel('Mean absolute weight')
+        ax.set_title('Policy Weight Scale (track implicit shrinkage/expansion)')
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
+        ax.grid(True, alpha=0.3)
+        plot_idx += 1
+
+    # Parameter count
     if has_complexity:
         ax = axes[plot_idx]
         ax.plot(gens, history['mean_policy_params'], label='Mean Params', color='teal')
@@ -279,6 +463,24 @@ def main():
     fig.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"Plot saved: {plot_path}")
+
+    lineage_info = history.get('lineage_artifacts', {})
+    lineage_path = lineage_info.get('lineage_jsonl')
+    lineage_meta = lineage_info.get('lineage_meta_json')
+    if lineage_path and os.path.exists(lineage_path):
+        color_mode = 'species' if train_cfg.speciation else 'method'
+        lineage_plot = generate_lineage_plots(
+            lineage_path=lineage_path,
+            meta_path=lineage_meta,
+            out_prefix=os.path.join(train_cfg.output, 'lineage_tree'),
+            color_by=color_mode,
+            formats=('png', 'svg'),
+        )
+        print(f"Lineage DOT saved: {lineage_plot['dot_path']}")
+        for rendered in lineage_plot.get('rendered_paths', []):
+            print(f"Lineage plot saved: {rendered}")
+        if lineage_plot.get('warning'):
+            print(f"Lineage plot warning: {lineage_plot['warning']}")
 
 
 if __name__ == '__main__':

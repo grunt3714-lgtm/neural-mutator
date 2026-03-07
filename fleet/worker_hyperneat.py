@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Fleet worker — runs on each node, connects to the manager and evaluates genomes.
+Fleet worker for HyperNEAT — evaluates CPPN genomes on remote nodes.
 
 Usage:
-    python -m fleet.worker --host 192.168.1.94 --port 5555 --authkey secret --workers 7
+    python -m fleet.worker_hyperneat --host 192.168.1.94 --port 5555 --authkey neuralfleet --workers 7
 """
 
 import argparse
@@ -12,85 +12,33 @@ import socket
 import sys
 import time
 import multiprocessing as _mp
-from multiprocessing import set_start_method
-Pool = _mp.Pool
 from multiprocessing.managers import BaseManager
+
+Pool = _mp.Pool
 
 
 class FleetManager(BaseManager):
     pass
 
-# Register same names as master (client side — no callables needed)
 FleetManager.register('get_work_queue')
 FleetManager.register('get_result_queue')
 FleetManager.register('get_register_queue')
 
 
-def _eval_one(args):
-    """Evaluate a single genome in a worker subprocess.
-
-    Returns:
-        (mean_reward, env_steps)
-    """
-    genome_bytes, env_id, n_episodes, max_steps = args
-
-    # Lazy imports inside worker to avoid fork issues
-    import numpy as np
-    import gymnasium as gym
-    import torch
-
-    # Ensure snake env registered
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from src.snake_env import ensure_snake_registered
-    from src.genome import Genome
-    ensure_snake_registered()
-
-    # Register VizDoom Gymnasium envs when needed
-    if isinstance(env_id, str) and env_id.startswith('Vizdoom'):
-        import vizdoom.gymnasium_wrapper  # noqa: F401
-
-    genome = Genome.load_bytes(genome_bytes)
-    env = gym.make(env_id)
-    rewards = []
-    total_steps = 0
-
-    def _extract_obs(obs):
-        if isinstance(obs, dict):
-            if 'screen' in obs:
-                return obs['screen']
-            if 'observation' in obs:
-                return obs['observation']
-            return next(iter(obs.values()))
-        return obs
-
-    for ep in range(n_episodes):
-        obs, _ = env.reset()
-        total_reward = 0.0
-        for _ in range(max_steps):
-            obs_in = _extract_obs(obs)
-            action = genome.policy.act(obs_in)
-            if isinstance(env.action_space, gym.spaces.Discrete):
-                action = int(np.argmax(action))
-            else:
-                action = np.clip(action, env.action_space.low, env.action_space.high)
-            obs, reward, terminated, truncated, _ = env.step(action)
-            total_reward += reward
-            total_steps += 1
-            if terminated or truncated:
-                break
-        rewards.append(total_reward)
-    env.close()
-    return float(np.mean(rewards)), int(total_steps)
-
-
 def _eval_one_indexed(args):
-    """Wrapper that passes index through for imap_unordered."""
+    """Evaluate a single CPPN genome by index."""
     idx, genome_bytes, env_id, n_episodes, max_steps = args
-    fit, steps = _eval_one((genome_bytes, env_id, n_episodes, max_steps))
-    return idx, fit, steps
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from src.cppn import CPPN
+    from src.hyperneat_evolution import evaluate_genome
+
+    cppn = CPPN.from_bytes(genome_bytes)
+    fit, steps = evaluate_genome(cppn, env_id, n_episodes=n_episodes, max_steps=max_steps)
+    return idx, float(fit), int(steps)
 
 
-def _is_connection_error(exc: Exception) -> bool:
+def _is_connection_error(exc):
     text = f"{type(exc).__name__}: {exc}".lower()
     return any(k in text for k in [
         'brokenpipeerror', 'eoferror', 'connectionreseterror',
@@ -98,21 +46,14 @@ def _is_connection_error(exc: Exception) -> bool:
     ])
 
 
-def run_worker(host: str, port: int, authkey: bytes, local_workers: int,
-               name: str = None, prefetch: int = 0):
-    """Connect to fleet manager and process evaluation jobs.
-
-    Resilient mode: if manager connection drops (EOF/BrokenPipe/etc),
-    tear down local state and reconnect instead of exiting permanently.
-    """
+def run_worker(host, port, authkey, local_workers, name=None, prefetch=1):
     if name is None:
-        name = f"worker-{socket.gethostname()}"
+        name = f"hn-worker-{socket.gethostname()}"
 
     while True:
         print(f"[{name}] Connecting to {host}:{port}...")
         manager = FleetManager(address=(host, port), authkey=authkey)
 
-        # Retry connection
         connected = False
         for attempt in range(30):
             try:
@@ -125,7 +66,6 @@ def run_worker(host: str, port: int, authkey: bytes, local_workers: int,
                 else:
                     print(f"[{name}] Could not connect after 30 attempts: {e}")
         if not connected:
-            # Keep trying in resilient mode
             time.sleep(5)
             continue
 
@@ -133,7 +73,6 @@ def run_worker(host: str, port: int, authkey: bytes, local_workers: int,
         result_q = manager.get_result_queue()
         register_q = manager.get_register_queue()
 
-        # Announce ourselves
         try:
             register_q.put(name)
         except Exception as e:
@@ -141,11 +80,8 @@ def run_worker(host: str, port: int, authkey: bytes, local_workers: int,
             time.sleep(2)
             continue
 
-        effective_prefetch = prefetch if prefetch and prefetch > 0 else (local_workers * 2)
-        print(f"[{name}] Connected, {local_workers} local workers (prefetch={effective_prefetch})")
+        print(f"[{name}] Connected, {local_workers} local workers")
 
-        # Create local process pool for this manager session
-        # For workers=1, skip pool overhead entirely (avoids fork/spawn issues)
         pool = None
         if local_workers > 1:
             ctx = _mp.get_context('spawn')
@@ -160,20 +96,17 @@ def run_worker(host: str, port: int, authkey: bytes, local_workers: int,
                 batch = []
                 try:
                     job = work_q.get(timeout=30)
-                    if job is None:  # poison pill
+                    if job is None:
                         print(f"[{name}] Received shutdown signal")
                         return
                     batch.append(job)
                 except Exception as e:
                     if _is_connection_error(e):
-                        print(f"[{name}] manager connection lost while waiting for work: {e}")
+                        print(f"[{name}] connection lost: {e}")
                         break
                     continue
 
-                # Throughput-oriented default: when prefetch is unset/0, use legacy
-                # aggressive batching (2x local worker count) to keep workers fed.
-                # You can still set --prefetch explicitly to tune fairness vs throughput.
-                for _ in range(max(0, effective_prefetch - 1)):
+                for _ in range(max(0, prefetch - 1)):
                     try:
                         job = work_q.get_nowait()
                         if job is None:
@@ -181,7 +114,6 @@ def run_worker(host: str, port: int, authkey: bytes, local_workers: int,
                         batch.append(job)
                     except Exception as e:
                         if _is_connection_error(e):
-                            print(f"[{name}] manager connection lost during batch fetch: {e}")
                             break
                         break
 
@@ -189,8 +121,6 @@ def run_worker(host: str, port: int, authkey: bytes, local_workers: int,
                     continue
 
                 jobs_pulled += len(batch)
-
-                # Include index in args so imap_unordered can return it
                 indexed_args = [(idx, gb, env_id, n_ep, ms) for (idx, gb, env_id, n_ep, ms) in batch]
 
                 try:
@@ -201,18 +131,16 @@ def run_worker(host: str, port: int, authkey: bytes, local_workers: int,
                                 jobs_sent += 1
                             except Exception as e:
                                 if _is_connection_error(e):
-                                    print(f"[{name}] manager connection lost while sending result: {e}")
                                     break
                                 raise
                     else:
-                        for args in indexed_args:
-                            idx, fit, steps = _eval_one_indexed(args)
+                        for a in indexed_args:
+                            idx, fit, steps = _eval_one_indexed(a)
                             try:
                                 result_q.put((idx, fit, int(steps), name))
                                 jobs_sent += 1
                             except Exception as e:
                                 if _is_connection_error(e):
-                                    print(f"[{name}] manager connection lost while sending result: {e}")
                                     break
                                 raise
                 except Exception as e:
@@ -220,7 +148,7 @@ def run_worker(host: str, port: int, authkey: bytes, local_workers: int,
 
                 now = time.time()
                 if jobs_sent > 0 and (jobs_sent % 20 == 0 or (now - last_report) > 120):
-                    print(f"[{name}] stats pulled={jobs_pulled} sent={jobs_sent} batch={len(batch)}")
+                    print(f"[{name}] stats pulled={jobs_pulled} sent={jobs_sent}")
                     last_report = now
 
         except KeyboardInterrupt:
@@ -234,17 +162,15 @@ def run_worker(host: str, port: int, authkey: bytes, local_workers: int,
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Fleet worker')
+    parser = argparse.ArgumentParser(description='HyperNEAT Fleet Worker')
     parser.add_argument('--host', required=True, help='Manager host IP')
     parser.add_argument('--port', type=int, default=5555, help='Manager port')
     parser.add_argument('--authkey', default='neuralfleet', help='Auth key')
     parser.add_argument('--workers', type=int, default=7, help='Local worker processes')
-    parser.add_argument('--prefetch', type=int, default=0,
-                        help='Jobs to prefetch from manager queue per pull cycle (default: 0=auto=2x local workers)')
+    parser.add_argument('--prefetch', type=int, default=1, help='Jobs to prefetch')
     parser.add_argument('--name', default=None, help='Worker name')
     args = parser.parse_args()
 
-    # OMP_NUM_THREADS=1 to avoid PyTorch deadlock in fork pools
     os.environ['OMP_NUM_THREADS'] = '1'
 
     run_worker(

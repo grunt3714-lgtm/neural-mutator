@@ -69,6 +69,8 @@ class DiscordTqdmSink(ProgressSink):
             miniters=1,
         )
         self._last = 0
+        if not hasattr(self._bar, "disable"):
+            self._bar.disable = False
         self._pop_size = pop_size
         self._genome_bar = None
         self._token = token
@@ -83,6 +85,8 @@ class DiscordTqdmSink(ProgressSink):
                 mininterval=5,
                 miniters=1,
             )
+            if not hasattr(self._genome_bar, "disable"):
+                self._genome_bar.disable = False
 
     def on_genome_progress(self, collected: int, total: int) -> None:
         """Called per genome result during fleet collect."""
@@ -113,6 +117,47 @@ class DiscordTqdmSink(ProgressSink):
             self._bar.close()
             if self._genome_bar is not None:
                 self._genome_bar.close()
+
+
+class DiscordMessageSink(ProgressSink):
+    """Discord REST message fallback when tqdm.contrib.discord is unavailable/broken."""
+
+    def __init__(self, token: str, channel_id: int):
+        import requests
+        self._requests = requests
+        self._token = token
+        self._channel_id = int(channel_id)
+        self._message_id = None
+        self._last_sent_gen = -1
+
+    def _headers(self) -> dict:
+        return {
+            'Authorization': f'Bot {self._token}',
+            'Content-Type': 'application/json',
+        }
+
+    def on_progress(self, event: ProgressEvent) -> None:
+        # Avoid duplicate spam if called repeatedly for same generation.
+        if event.gen == self._last_sent_gen:
+            return
+        self._last_sent_gen = event.gen
+
+        pct = int(((event.gen + 1) / max(1, event.total)) * 100)
+        content = (
+            f"🐍 Fleet Training {event.gen + 1}/{event.total} ({pct}%) | "
+            f"best={event.best:+.2f} mean={event.mean:+.2f} best_ever={event.best_ever:+.2f}"
+        )
+
+        if self._message_id is None:
+            url = f"https://discord.com/api/v10/channels/{self._channel_id}/messages"
+            r = self._requests.post(url, headers=self._headers(), json={'content': content}, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+            self._message_id = data.get('id')
+        else:
+            url = f"https://discord.com/api/v10/channels/{self._channel_id}/messages/{self._message_id}"
+            r = self._requests.patch(url, headers=self._headers(), json={'content': content}, timeout=10)
+            r.raise_for_status()
 
 
 class ProgressReporter:

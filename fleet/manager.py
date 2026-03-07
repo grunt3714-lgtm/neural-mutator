@@ -11,6 +11,7 @@ Usage (from evolution.py):
     fitnesses = fleet.evaluate_population(genome_bytes_list, env_id, n_episodes, max_steps)
 """
 
+import os
 import time
 import struct
 from multiprocessing.managers import BaseManager
@@ -117,19 +118,25 @@ class FleetEvaluator:
         results = [None] * n
         step_counts = [0] * n
         collected = 0
+        worker_counts = {}
 
+        timeout_sec = float(os.getenv('FLEET_RESULT_TIMEOUT_SEC', '600'))
         while collected < n:
             try:
-                payload = self._result_queue.get(timeout=120)
+                payload = self._result_queue.get(timeout=timeout_sec)
+                worker = 'unknown'
                 if len(payload) == 2:
                     idx, fitness = payload
                     steps = 0
-                else:
+                elif len(payload) == 3:
                     idx, fitness, steps = payload
+                else:
+                    idx, fitness, steps, worker = payload
                 if results[idx] is None:
                     results[idx] = fitness
                     step_counts[idx] = int(steps)
                     collected += 1
+                    worker_counts[worker] = worker_counts.get(worker, 0) + 1
                     if genome_callback is not None:
                         try:
                             genome_callback(collected, n)
@@ -155,7 +162,10 @@ class FleetEvaluator:
             'env_steps': int(sum(step_counts)),
             'genomes_evaluated': int(n),
             'active_workers': int(len(self._workers)),
+            'worker_counts': worker_counts,
         }
+        if worker_counts:
+            print(f"[fleet] result distribution: {dict(sorted(worker_counts.items()))}")
         return results, profile
 
     # ── Synchronous convenience (backwards-compatible) ──────────────
